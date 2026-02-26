@@ -2,23 +2,18 @@
 Deepfake frame dataset training script
 ======================================
 
-This script trains Swin-Tiny on extracted frames from multiple datasets:
+Trains Swin-Tiny on pre-extracted frames from:
 - FaceForensics++ extracted frames (train/val/test with numeric class folders)
 - Deepfake_Dataset extracted frames (train/valid/test with class name folders)
-
-It loads images directly from the extracted frame folders, builds tf.data pipelines,
-and trains with AUC-focused metrics and callbacks.
 """
 
 import os
-import cv2
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 from model_factory import build_swin_tiny
 from sklearn.model_selection import train_test_split
-from tqdm import tqdm
 import json
 from datetime import datetime
 
@@ -33,19 +28,16 @@ class Config:
     
     # Dataset paths
     if KAGGLE_ENV:
-        # Kaggle dataset paths (read-only mounted datasets)
         FFPP_FRAMES_ROOT = (
             '/kaggle/input/datasets/muhammadqaiser1921/faceforenscis/ffpp_binary_frames'
         )
         DEEPFAKE_FRAMES_ROOT = (
             '/kaggle/input/datasets/aryansingh16/deepfake-dataset/real_vs_fake/real-vs-fake'
         )
-        # Output directory for Kaggle
         CHECKPOINT_DIR = '/kaggle/working/models/checkpoints'
         LOG_DIR = '/kaggle/working/results/logs'
         WEIGHTS_DIR = '/kaggle/working/weights'
     else:
-        # Local paths
         FFPP_FRAMES_ROOT = r'E:\FYP\Dataset\ffpp_binary_frames'
         DEEPFAKE_FRAMES_ROOT = r'E:\FYP\Dataset\real-vs-fake'
         CHECKPOINT_DIR = os.path.join('..', 'models', 'checkpoints')
@@ -56,319 +48,31 @@ class Config:
     FFPP_SPLITS = {'train': 'train', 'val': 'val', 'test': 'test'}
     DEEPFAKE_SPLITS = {'train': 'train', 'val': 'valid', 'test': 'test'}
 
-    # Label maps
-    # FaceForensics++ frames: folder names are "0" and "1" (0=real, 1=fake)
+    # Label maps: FaceForensics++ folders are "0" and "1" (0=real, 1=fake)
     FFPP_LABELS = {'0': 0, '1': 1}
     # Deepfake dataset: folder names are "real" and "fake"
     DEEPFAKE_LABELS = {'real': 0, 'fake': 1}
 
     IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
     
-    # Deepfake folders (label = 0)
-    FAKE_FOLDERS = [
-        'DeepFakeDetection',
-        'Deepfakes',
-        'Face2Face',
-        'FaceShifter',
-        'FaceSwap',
-        'NeuralTextures'
-    ]
-    
-    # Real folder (label = 1)
-    REAL_FOLDER = 'original'
-    
-    # Frame extraction settings
-    FRAMES_PER_VIDEO = 10  # Unused for extracted frames
-    IMG_SIZE = 224  # Input size for Swin-Tiny (224x224)
-    FACE_DETECTION = True  # Set to False to use center crops instead
-    
     # Training settings
-    BATCH_SIZE = 16  # Adjust based on your GPU memory (Kaggle: 12-16)
+    IMG_SIZE = 224
+    BATCH_SIZE = 16
     EPOCHS = 50
     INITIAL_LR = 1e-4
-    VAL_SPLIT = 0.2  # Used only if val folder is missing
+    VAL_SPLIT = 0.2
     
     # Model settings
-    NUM_CLASSES = 2  # Binary: fake (0) or real (1)
+    NUM_CLASSES = 2
     INPUT_SHAPE = (IMG_SIZE, IMG_SIZE, 3)
     
     # Data augmentation
     AUGMENTATION = True
-    
-    # Model saving options
-    SAVE_WEIGHTS = True  # Save weights separately
-    SAVE_FULL_MODEL = True  # Save entire model
-    SAVE_HISTORY = True  # Save training history
+    SAVE_WEIGHTS = True
+    SAVE_HISTORY = True
 
     # Optional limit per class (None = all)
     MAX_IMAGES_PER_CLASS = None
-
-
-# ========== FACE DETECTION ==========
-
-def load_face_detector():
-    """
-    Load OpenCV's pre-trained face detector (Haar Cascade or DNN).
-    Returns None if face detection is disabled in config.
-    """
-    if not Config.FACE_DETECTION:
-        return None
-    
-    try:
-        # Try to load DNN face detector (more accurate)
-        model_file = "res10_300x300_ssd_iter_140000.caffemodel"
-        config_file = "deploy.prototxt"
-        
-        if os.path.exists(model_file) and os.path.exists(config_file):
-            detector = cv2.dnn.readNetFromCaffe(config_file, model_file)
-            print("✓ Loaded DNN face detector")
-            return detector
-    except:
-        pass
-    
-    try:
-        # Fallback to Haar Cascade
-        detector = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-        print("✓ Loaded Haar Cascade face detector")
-        return detector
-    except:
-        print("⚠ Face detector not available, using center crops")
-        return None
-
-
-def detect_and_crop_face(frame, detector=None, margin=0.2):
-    """
-    Detect face in frame and crop with margin.
-    Falls back to center crop if no face detected.
-    
-    Args:
-        frame: Input frame (BGR format)
-        detector: Face detector object
-        margin: Additional margin around face (0.2 = 20% larger crop)
-    
-    Returns:
-        Cropped face region (BGR format)
-    """
-    h, w = frame.shape[:2]
-    
-    if detector is None:
-        # Center crop
-        size = min(h, w)
-        y_start = (h - size) // 2
-        x_start = (w - size) // 2
-        return frame[y_start:y_start+size, x_start:x_start+size]
-    
-    # Try face detection
-    try:
-        # For DNN detector
-        if hasattr(detector, 'forward'):
-            blob = cv2.dnn.blobFromImage(frame, 1.0, (300, 300), (104.0, 177.0, 123.0))
-            detector.setInput(blob)
-            detections = detector.forward()
-            
-            # Get highest confidence detection
-            best_conf = 0
-            best_box = None
-            for i in range(detections.shape[2]):
-                confidence = detections[0, 0, i, 2]
-                if confidence > best_conf and confidence > 0.5:
-                    best_conf = confidence
-                    box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-                    best_box = box.astype("int")
-            
-            if best_box is not None:
-                x1, y1, x2, y2 = best_box
-                # Add margin
-                fw, fh = x2 - x1, y2 - y1
-                x1 = max(0, int(x1 - fw * margin))
-                y1 = max(0, int(y1 - fh * margin))
-                x2 = min(w, int(x2 + fw * margin))
-                y2 = min(h, int(y2 + fh * margin))
-                return frame[y1:y2, x1:x2]
-        
-        # For Haar Cascade
-        else:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = detector.detectMultiScale(gray, 1.3, 5)
-            
-            if len(faces) > 0:
-                # Get largest face
-                face = max(faces, key=lambda x: x[2] * x[3])
-                x, y, fw, fh = face
-                # Add margin
-                x1 = max(0, int(x - fw * margin))
-                y1 = max(0, int(y - fh * margin))
-                x2 = min(w, int(x + fw * (1 + margin)))
-                y2 = min(h, int(y + fh * (1 + margin)))
-                return frame[y1:y2, x1:x2]
-    except:
-        pass
-    
-    # Fallback to center crop
-    size = min(h, w)
-    y_start = (h - size) // 2
-    x_start = (w - size) // 2
-    return frame[y_start:y_start+size, x_start:x_start+size]
-
-
-# ========== VIDEO PROCESSING ==========
-
-def extract_frames_from_video(video_path, num_frames=10, detector=None):
-    """
-    Extract uniformly sampled frames from video with face detection/cropping.
-    
-    Args:
-        video_path: Path to video file
-        num_frames: Number of frames to extract
-        detector: Face detector object
-    
-    Returns:
-        List of preprocessed frames (224x224x3, normalized)
-    """
-    frames = []
-    
-    try:
-        cap = cv2.VideoCapture(video_path)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        
-        if total_frames == 0:
-            cap.release()
-            return []
-        
-        # Sample frame indices uniformly
-        if total_frames <= num_frames:
-            frame_indices = list(range(total_frames))
-        else:
-            frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
-        
-        for idx in frame_indices:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-            ret, frame = cap.read()
-            
-            if not ret or frame is None:
-                continue
-            
-            # Detect and crop face
-            face_crop = detect_and_crop_face(frame, detector)
-            
-            # Resize to target size
-            face_crop = cv2.resize(face_crop, (Config.IMG_SIZE, Config.IMG_SIZE))
-            
-            # Convert BGR to RGB
-            face_crop = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
-            
-            # Normalize to [0, 1]
-            face_crop = face_crop.astype(np.float32) / 255.0
-            
-            frames.append(face_crop)
-        
-        cap.release()
-    
-    except Exception as e:
-        print(f"Error processing {video_path}: {e}")
-        return []
-    
-    return frames
-
-
-# ========== DATASET LOADING ==========
-
-def load_faceforensics_dataset(detector=None, max_videos_per_class=None):
-    """
-    Load FaceForensics++ dataset and extract frames.
-    
-    Args:
-        detector: Face detector object
-        max_videos_per_class: Limit videos per class (for testing/debugging)
-    
-    Returns:
-        X: Array of frames (N, 224, 224, 3)
-        y: Array of labels (N,) - 0 for fake, 1 for real
-        video_info: List of dicts with metadata
-    """
-    X = []
-    y = []
-    video_info = []
-    
-    print("\n" + "="*60)
-    print("LOADING FACEFORENSICS++ DATASET")
-    print("="*60)
-    
-    # Process fake videos (label = 0)
-    for folder in Config.FAKE_FOLDERS:
-        folder_path = os.path.join(Config.DATA_ROOT, folder)
-        
-        if not os.path.exists(folder_path):
-            print(f"⚠ Warning: Folder not found: {folder_path}")
-            continue
-        
-        video_files = [f for f in os.listdir(folder_path) if f.endswith('.mp4')]
-        
-        if max_videos_per_class:
-            video_files = video_files[:max_videos_per_class]
-        
-        print(f"\n📁 Processing {folder}: {len(video_files)} videos")
-        
-        for video_file in tqdm(video_files, desc=f"  {folder}"):
-            video_path = os.path.join(folder_path, video_file)
-            frames = extract_frames_from_video(video_path, Config.FRAMES_PER_VIDEO, detector)
-            
-            if len(frames) > 0:
-                X.extend(frames)
-                y.extend([0] * len(frames))  # Label 0 = fake
-                
-                for i in range(len(frames)):
-                    video_info.append({
-                        'video_path': video_path,
-                        'video_name': video_file,
-                        'manipulation': folder,
-                        'frame_idx': i,
-                        'label': 0
-                    })
-    
-    # Process real videos (label = 1)
-    real_folder_path = os.path.join(Config.DATA_ROOT, Config.REAL_FOLDER)
-    
-    if os.path.exists(real_folder_path):
-        video_files = [f for f in os.listdir(real_folder_path) if f.endswith('.mp4')]
-        
-        if max_videos_per_class:
-            video_files = video_files[:max_videos_per_class]
-        
-        print(f"\n📁 Processing {Config.REAL_FOLDER}: {len(video_files)} videos")
-        
-        for video_file in tqdm(video_files, desc=f"  {Config.REAL_FOLDER}"):
-            video_path = os.path.join(real_folder_path, video_file)
-            frames = extract_frames_from_video(video_path, Config.FRAMES_PER_VIDEO, detector)
-            
-            if len(frames) > 0:
-                X.extend(frames)
-                y.extend([1] * len(frames))  # Label 1 = real
-                
-                for i in range(len(frames)):
-                    video_info.append({
-                        'video_path': video_path,
-                        'video_name': video_file,
-                        'manipulation': 'original',
-                        'frame_idx': i,
-                        'label': 1
-                    })
-    else:
-        print(f"⚠ Warning: Real folder not found: {real_folder_path}")
-    
-    # Convert to numpy arrays
-    X = np.array(X, dtype=np.float32)
-    y = np.array(y, dtype=np.int32)
-    
-    print("\n" + "="*60)
-    print(f"✓ Dataset loaded successfully!")
-    print(f"  Total frames: {len(X)}")
-    print(f"  Fake frames: {np.sum(y == 0)}")
-    print(f"  Real frames: {np.sum(y == 1)}")
-    print(f"  Frame shape: {X.shape}")
-    print("="*60 + "\n")
-    
-    return X, y, video_info
 
 
 def _collect_image_paths(split_root, class_map, image_exts, max_per_class=None):
