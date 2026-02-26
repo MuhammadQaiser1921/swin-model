@@ -203,10 +203,32 @@ class WindowAttention(layers.Layer):
         
         # Project concatenated attention outputs back to original dimension
         self.proj = layers.Dense(dim)
+        
+        # Pre-compute relative position indices (eager evaluation in __init__)
+        # This maps each (query_token, key_token) pair to an index in the bias table
+        coords_h = np.arange(self.window_size[0])
+        coords_w = np.arange(self.window_size[1])
+        coords = np.stack(np.meshgrid(coords_h, coords_w, indexing="ij"))
+        coords_flatten = coords.reshape(2, -1)
+        
+        # Calculate relative coordinates: (query_position - key_position)
+        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]
+        relative_coords = relative_coords.transpose([1, 2, 0])
+        
+        # Shift indices to positive range: add (window_size - 1) so indices are 0 to (2*window_size - 2)
+        relative_coords[:, :, 0] += self.window_size[0] - 1
+        relative_coords[:, :, 1] += self.window_size[1] - 1
+        
+        # Flatten 2D indices to 1D using row-major order
+        relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
+        relative_position_index = relative_coords.sum(-1)
+        
+        # Store as numpy array for efficient lookup (not a trainable weight)
+        self.relative_position_index_np = relative_position_index.astype('int32')
 
     def build(self, input_shape):
         """
-        Build relative position bias table and indices.
+        Build relative position bias table.
         
         Relative position bias is a key innovation in Swin Transformer:
         - Instead of absolute positional encoding, we use relative position biases
@@ -229,28 +251,6 @@ class WindowAttention(layers.Layer):
             trainable=True,
             name="relative_position_bias_table",
         )
-        
-        # Pre-compute relative position indices (done once at build time, not at each forward pass)
-        # This maps each (query_token, key_token) pair to an index in the bias table
-        coords_h = np.arange(self.window_size[0])
-        coords_w = np.arange(self.window_size[1])
-        coords = np.stack(np.meshgrid(coords_h, coords_w, indexing="ij"))
-        coords_flatten = coords.reshape(2, -1)
-        
-        # Calculate relative coordinates: (query_position - key_position)
-        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]
-        relative_coords = relative_coords.transpose([1, 2, 0])
-        
-        # Shift indices to positive range: add (window_size - 1) so indices are 0 to (2*window_size - 2)
-        relative_coords[:, :, 0] += self.window_size[0] - 1
-        relative_coords[:, :, 1] += self.window_size[1] - 1
-        
-        # Flatten 2D indices to 1D using row-major order
-        relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
-        relative_position_index = relative_coords.sum(-1)
-
-        # Store as numpy array for efficient lookup (not a trainable weight)
-        self.relative_position_index_np = relative_position_index.astype('int32')
 
     def call(self, x, mask=None):
         """
@@ -407,29 +407,15 @@ class SwinTransformerBlock(layers.Layer):
         if min(self.num_patch) < self.window_size:
             self.shift_size = 0
             self.window_size = min(self.num_patch)
-
-    def build(self, input_shape):
-        """
-        Build attention mask for shifted windows (SW-MSA).
         
-        The mask prevents attention between regions that should be disconnected
-        after the shift operation. This is crucial for shifted window attention.
-        
-        How it works:
-        1. If shift_size = 0: No mask needed (standard W-MSA)
-        2. If shift_size > 0: Create mask that assigns different IDs to regions
-        3. Regions with different IDs cannot attend to each other (masked with -100)
-        
-        For a 7x7 window with shift_size=3, we create 9 regions that are partitioned,
-        and the mask ensures clean separation.
-        """
+        # Pre-compute attention mask for shifted windows (eager evaluation in __init__)
+        # This prevents attention between regions that should be disconnected after the shift
         if self.shift_size == 0:
-            self.attn_mask = None
             self.attn_mask_np = None
         else:
             height, width = self.num_patch
             
-            # Define 3x3 regions after shifting
+            # Define 3x3 regions after shifting (using numpy)
             h_slices = (
                 slice(0, -self.window_size),
                 slice(-self.window_size, -self.shift_size),
@@ -441,29 +427,34 @@ class SwinTransformerBlock(layers.Layer):
                 slice(-self.shift_size, None),
             )
             
-            # Create mask array with region IDs
-            mask_array = np.zeros((1, height, width, 1))
+            # Create mask array with region IDs (pure numpy)
+            mask_array = np.zeros((height, width))
             count = 0
             for h in h_slices:
                 for w in w_slices:
-                    mask_array[:, h, w, :] = count
+                    mask_array[h, w] = count
                     count += 1
-            mask_array = tf.convert_to_tensor(mask_array)
-
-            # Partition mask into windows
-            mask_windows = window_partition(mask_array, self.window_size)
-            mask_windows = tf.reshape(
-                mask_windows, shape=[-1, self.window_size * self.window_size]
-            )
+            
+            # Partition mask into windows manually (numpy version)
+            num_h = height // self.window_size
+            num_w = width // self.window_size
+            mask_windows = []
+            for i in range(num_h):
+                for j in range(num_w):
+                    h_start = i * self.window_size
+                    w_start = j * self.window_size
+                    window = mask_array[h_start:h_start+self.window_size, 
+                                       w_start:w_start+self.window_size]
+                    mask_windows.append(window.flatten())
+            mask_windows = np.array(mask_windows)  # (num_windows, window_size²)
             
             # Create attention mask: where region IDs differ, set attention to -100
-            attn_mask = tf.expand_dims(mask_windows, axis=1) - tf.expand_dims(
-                mask_windows, axis=2
-            )
-            attn_mask = tf.where(attn_mask != 0, -100.0, attn_mask)  # Mask different regions
-            attn_mask = tf.where(attn_mask == 0, 0.0, attn_mask)      # Keep same region as 0
-            # Store as numpy array for efficient lookup (not a trainable weight)
-            self.attn_mask_np = attn_mask.numpy().astype('float32')
+            attn_mask = mask_windows[:, :, None] - mask_windows[:, None, :]  # broadcast difference
+            attn_mask = np.where(attn_mask != 0, -100.0, attn_mask)
+            attn_mask = np.where(attn_mask == 0, 0.0, attn_mask)
+            
+            # Store as numpy array for efficient lookup
+            self.attn_mask_np = attn_mask.astype('float32')
 
     def call(self, x):
         """
