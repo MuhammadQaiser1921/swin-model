@@ -1,22 +1,13 @@
 """
-FaceForensics++ Video Model Training Script
-===========================================
+Deepfake frame dataset training script
+======================================
 
-This script trains the Swin-Tiny model on the FaceForensics++ dataset (C23 compression)
-for deepfake detection. The dataset contains 6000 deepfake videos (from 6 manipulation
-methods) and 1000 real videos.
+This script trains Swin-Tiny on extracted frames from multiple datasets:
+- FaceForensics++ extracted frames (train/val/test with numeric class folders)
+- Deepfake_Dataset extracted frames (train/valid/test with class name folders)
 
-Dataset Structure:
-- DeepFakeDetection: 1000 deepfake videos
-- Deepfakes: 1000 deepfake videos
-- Face2Face: 1000 deepfake videos
-- FaceShifter: 1000 deepfake videos
-- FaceSwap: 1000 deepfake videos
-- NeuralTextures: 1000 deepfake videos
-- original: 1000 real videos
-
-The script extracts frames from videos, detects/crops faces, and trains the model
-with proper data augmentation and callbacks.
+It loads images directly from the extracted frame folders, builds tf.data pipelines,
+and trains with AUC-focused metrics and callbacks.
 """
 
 import os
@@ -43,18 +34,35 @@ class Config:
     # Dataset paths
     if KAGGLE_ENV:
         # Kaggle dataset paths (read-only mounted datasets)
-        # Dataset: faceforensics-c23
-        DATA_ROOT = '/kaggle/input/faceforensics-c23'  # Adjust if dataset name is different
+        FFPP_FRAMES_ROOT = (
+            '/kaggle/input/datasets/muhammadqaiser1921/faceforenscis/ffpp_binary_frames'
+        )
+        DEEPFAKE_FRAMES_ROOT = (
+            '/kaggle/input/datasets/aryansingh16/deepfake-dataset/real_vs_fake/real-vs-fake'
+        )
         # Output directory for Kaggle
         CHECKPOINT_DIR = '/kaggle/working/models/checkpoints'
         LOG_DIR = '/kaggle/working/results/logs'
         WEIGHTS_DIR = '/kaggle/working/weights'
     else:
         # Local paths
-        DATA_ROOT = r'E:\FYP\Dataset\FaceForensics++'  # Update this path to your dataset location
+        FFPP_FRAMES_ROOT = r'E:\FYP\Dataset\ffpp_binary_frames'
+        DEEPFAKE_FRAMES_ROOT = r'E:\FYP\Dataset\real-vs-fake'
         CHECKPOINT_DIR = os.path.join('..', 'models', 'checkpoints')
         LOG_DIR = os.path.join('..', 'results', 'logs')
         WEIGHTS_DIR = os.path.join('..', 'models', 'weights')
+
+    # Split names in each dataset
+    FFPP_SPLITS = {'train': 'train', 'val': 'val', 'test': 'test'}
+    DEEPFAKE_SPLITS = {'train': 'train', 'val': 'valid', 'test': 'test'}
+
+    # Label maps
+    # FaceForensics++ frames: folder names are "0" and "1" (0=real, 1=fake)
+    FFPP_LABELS = {'0': 0, '1': 1}
+    # Deepfake dataset: folder names are "real" and "fake"
+    DEEPFAKE_LABELS = {'real': 0, 'fake': 1}
+
+    IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
     
     # Deepfake folders (label = 0)
     FAKE_FOLDERS = [
@@ -70,7 +78,7 @@ class Config:
     REAL_FOLDER = 'original'
     
     # Frame extraction settings
-    FRAMES_PER_VIDEO = 10  # Extract N frames uniformly from each video
+    FRAMES_PER_VIDEO = 10  # Unused for extracted frames
     IMG_SIZE = 224  # Input size for Swin-Tiny (224x224)
     FACE_DETECTION = True  # Set to False to use center crops instead
     
@@ -78,7 +86,7 @@ class Config:
     BATCH_SIZE = 16  # Adjust based on your GPU memory (Kaggle: 12-16)
     EPOCHS = 50
     INITIAL_LR = 1e-4
-    VAL_SPLIT = 0.2  # 80% train, 20% validation
+    VAL_SPLIT = 0.2  # Used only if val folder is missing
     
     # Model settings
     NUM_CLASSES = 2  # Binary: fake (0) or real (1)
@@ -91,6 +99,9 @@ class Config:
     SAVE_WEIGHTS = True  # Save weights separately
     SAVE_FULL_MODEL = True  # Save entire model
     SAVE_HISTORY = True  # Save training history
+
+    # Optional limit per class (None = all)
+    MAX_IMAGES_PER_CLASS = None
 
 
 # ========== FACE DETECTION ==========
@@ -360,6 +371,121 @@ def load_faceforensics_dataset(detector=None, max_videos_per_class=None):
     return X, y, video_info
 
 
+def _collect_image_paths(split_root, class_map, image_exts, max_per_class=None):
+    paths = []
+    labels = []
+
+    if not os.path.exists(split_root):
+        return paths, labels
+
+    for class_name, label in class_map.items():
+        class_dir = os.path.join(split_root, class_name)
+        if not os.path.exists(class_dir):
+            continue
+
+        collected = 0
+        for root, _, files in os.walk(class_dir):
+            for name in sorted(files):
+                if not name.lower().endswith(image_exts):
+                    continue
+                paths.append(os.path.join(root, name))
+                labels.append(label)
+                collected += 1
+                if max_per_class and collected >= max_per_class:
+                    break
+            if max_per_class and collected >= max_per_class:
+                break
+
+    return paths, labels
+
+
+def load_extracted_frame_paths():
+    """
+    Load extracted frame paths from two datasets with separate split conventions.
+
+    Returns:
+        dict with train/val/test paths and labels.
+    """
+    datasets = [
+        {
+            'root': Config.FFPP_FRAMES_ROOT,
+            'splits': Config.FFPP_SPLITS,
+            'labels': Config.FFPP_LABELS,
+            'name': 'FaceForensics++',
+        },
+        {
+            'root': Config.DEEPFAKE_FRAMES_ROOT,
+            'splits': Config.DEEPFAKE_SPLITS,
+            'labels': Config.DEEPFAKE_LABELS,
+            'name': 'Deepfake_Dataset',
+        },
+    ]
+
+    output = {
+        'train_paths': [],
+        'train_labels': [],
+        'val_paths': [],
+        'val_labels': [],
+        'test_paths': [],
+        'test_labels': [],
+    }
+
+    for dataset in datasets:
+        root = dataset['root']
+        splits = dataset['splits']
+        labels = dataset['labels']
+        name = dataset['name']
+
+        print(f"\n📁 Loading extracted frames: {name}")
+        print(f"   Root: {root}")
+
+        for split_key, split_folder in splits.items():
+            split_root = os.path.join(root, split_folder)
+            paths, lbls = _collect_image_paths(
+                split_root,
+                labels,
+                Config.IMAGE_EXTS,
+                max_per_class=Config.MAX_IMAGES_PER_CLASS,
+            )
+
+            output[f"{split_key}_paths"].extend(paths)
+            output[f"{split_key}_labels"].extend(lbls)
+
+            print(
+                f"   {split_key}: {len(paths)} images from {split_root}"
+            )
+
+    return output
+
+
+def _decode_image(path, label):
+    image = tf.io.read_file(path)
+    image = tf.image.decode_image(image, channels=3, expand_animations=False)
+    image = tf.image.resize(image, (Config.IMG_SIZE, Config.IMG_SIZE))
+    image = tf.cast(image, tf.float32) / 255.0
+    return image, label
+
+
+def build_image_dataset(paths, labels, batch_size, shuffle=False, augment=False):
+    if len(paths) == 0:
+        return None
+
+    dataset = tf.data.Dataset.from_tensor_slices((paths, labels))
+    if shuffle:
+        dataset = dataset.shuffle(buffer_size=min(len(paths), 20000))
+
+    dataset = dataset.map(_decode_image, num_parallel_calls=tf.data.AUTOTUNE)
+
+    if augment and Config.AUGMENTATION:
+        augmentation = create_augmentation_layer()
+        dataset = dataset.map(
+            lambda x, y: (augmentation(x, training=True), y),
+            num_parallel_calls=tf.data.AUTOTUNE,
+        )
+
+    return dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
+
 # ========== DATA AUGMENTATION ==========
 
 def create_augmentation_layer():
@@ -507,6 +633,9 @@ def save_model_weights(model, model_name="swin_tiny_video"):
     print(f"✓ Model summary saved: {summary_path}")
     
     return save_paths
+
+
+def create_callbacks(model_name="swin_tiny_video"):
     """
     Create training callbacks for monitoring and checkpointing.
     """
@@ -589,7 +718,8 @@ def train_video_model():
     
     # Print configuration
     print("\n📋 Configuration:")
-    print(f"  Dataset root: {Config.DATA_ROOT}")
+    print(f"  FF++ frames root: {Config.FFPP_FRAMES_ROOT}")
+    print(f"  Deepfake frames root: {Config.DEEPFAKE_FRAMES_ROOT}")
     print(f"  Frames per video: {Config.FRAMES_PER_VIDEO}")
     print(f"  Image size: {Config.IMG_SIZE}x{Config.IMG_SIZE}")
     print(f"  Batch size: {Config.BATCH_SIZE}")
@@ -599,50 +729,51 @@ def train_video_model():
     print(f"  Face detection: {Config.FACE_DETECTION}")
     print(f"  Data augmentation: {Config.AUGMENTATION}")
     
-    # Load face detector
-    detector = load_face_detector()
-    
-    # Load dataset
-    # For testing: use max_videos_per_class=10 to quickly test the pipeline
-    # For full training: remove the parameter or set to None
-    X, y, video_info = load_faceforensics_dataset(
-        detector=detector,
-        max_videos_per_class=None  # Set to small number (e.g., 10) for testing
-    )
-    
-    if len(X) == 0:
-        print("❌ Error: No data loaded. Please check your dataset path.")
+    # Load extracted frame paths
+    paths = load_extracted_frame_paths()
+
+    train_paths = paths['train_paths']
+    train_labels = np.array(paths['train_labels'], dtype=np.int32)
+    val_paths = paths['val_paths']
+    val_labels = np.array(paths['val_labels'], dtype=np.int32)
+    test_paths = paths['test_paths']
+    test_labels = np.array(paths['test_labels'], dtype=np.int32)
+
+    if len(train_paths) == 0:
+        print("❌ Error: No training data found. Check dataset roots and split folders.")
         return
-    
-    # Train/validation split
-    X_train, X_val, y_train, y_val = train_test_split(
-        X, y, 
-        test_size=Config.VAL_SPLIT, 
-        random_state=42,
-        stratify=y  # Maintain class balance
-    )
-    
-    print(f"\n📊 Data split:")
-    print(f"  Training samples: {len(X_train)}")
-    print(f"  Validation samples: {len(X_val)}")
-    print(f"  Train fake/real: {np.sum(y_train == 0)}/{np.sum(y_train == 1)}")
-    print(f"  Val fake/real: {np.sum(y_val == 0)}/{np.sum(y_val == 1)}")
-    
-    # Create TensorFlow datasets
-    train_dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train))
-    val_dataset = tf.data.Dataset.from_tensor_slices((X_val, y_val))
-    
-    # Apply augmentation to training data
-    if Config.AUGMENTATION:
-        augmentation = create_augmentation_layer()
-        train_dataset = train_dataset.map(
-            lambda x, y: (augmentation(x, training=True), y),
-            num_parallel_calls=tf.data.AUTOTUNE
+
+    # If val split is missing, create it from train split
+    if len(val_paths) == 0:
+        train_paths, val_paths, train_labels, val_labels = train_test_split(
+            train_paths,
+            train_labels,
+            test_size=Config.VAL_SPLIT,
+            random_state=42,
+            stratify=train_labels,
         )
-    
-    # Batch and prefetch
-    train_dataset = train_dataset.shuffle(1000).batch(Config.BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
-    val_dataset = val_dataset.batch(Config.BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
+
+    print(f"\n📊 Data split:")
+    print(f"  Training samples: {len(train_paths)}")
+    print(f"  Validation samples: {len(val_paths)}")
+    print(f"  Train fake/real: {np.sum(train_labels == 1)}/{np.sum(train_labels == 0)}")
+    print(f"  Val fake/real: {np.sum(val_labels == 1)}/{np.sum(val_labels == 0)}")
+
+    # Create TensorFlow datasets
+    train_dataset = build_image_dataset(
+        train_paths,
+        train_labels,
+        batch_size=Config.BATCH_SIZE,
+        shuffle=True,
+        augment=True,
+    )
+    val_dataset = build_image_dataset(
+        val_paths,
+        val_labels,
+        batch_size=Config.BATCH_SIZE,
+        shuffle=False,
+        augment=False,
+    )
     
     # Build model
     print(f"\n🏗️ Building Swin-Tiny model...")
@@ -694,11 +825,11 @@ def train_video_model():
     print(f"\n📊 Computing AUC and other metrics on validation set...")
     
     # Get predictions on validation set
-    y_val_pred_probs = model.predict(X_val)
-    y_val_pred_probs = y_val_pred_probs[:, 1]  # Get probabilities for class 1 (real)
+    y_val_pred_probs = model.predict(val_dataset)
+    y_val_pred_probs = y_val_pred_probs[:, 1]  # Get probabilities for class 1 (fake)
     
     # Compute AUC metrics
-    auc_metrics = compute_auc_metrics(y_val, y_val_pred_probs)
+    auc_metrics = compute_auc_metrics(val_labels, y_val_pred_probs)
     
     # Save final model
     final_model_path = os.path.join(
@@ -763,13 +894,23 @@ def train_video_model():
     print("="*60 + "\n")
     
     # Also compute test metrics if we have test data
-    print("📊 Computing AUC on test set...")
-    y_test_pred_probs = model.predict(X_val)  # Using val as test for now
-    y_test_pred_probs = y_test_pred_probs[:, 1]
-    test_auc_metrics = compute_auc_metrics(y_val, y_test_pred_probs)
-    
-    print(f"\nTest Set AUC-ROC: {test_auc_metrics['auc_roc']:.4f}")
-    print(f"Test Set PR-AUC: {test_auc_metrics['pr_auc']:.4f}\n")
+    if len(test_paths) > 0:
+        print("📊 Computing AUC on test set...")
+        test_dataset = build_image_dataset(
+            test_paths,
+            test_labels,
+            batch_size=Config.BATCH_SIZE,
+            shuffle=False,
+            augment=False,
+        )
+        y_test_pred_probs = model.predict(test_dataset)
+        y_test_pred_probs = y_test_pred_probs[:, 1]
+        test_auc_metrics = compute_auc_metrics(test_labels, y_test_pred_probs)
+        
+        print(f"\nTest Set AUC-ROC: {test_auc_metrics['auc_roc']:.4f}")
+        print(f"Test Set PR-AUC: {test_auc_metrics['pr_auc']:.4f}\n")
+    else:
+        print("📊 Test split not found. Skipping test metrics.")
     
     return model, history, auc_metrics
 
