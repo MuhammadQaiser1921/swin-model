@@ -249,15 +249,8 @@ class WindowAttention(layers.Layer):
         relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
         relative_position_index = relative_coords.sum(-1)
 
-        # Store as non-trainable weight for efficient lookup
-        with tf.init_scope():
-            self.relative_position_index = self.add_weight(
-                shape=relative_position_index.shape,
-                initializer=tf.constant_initializer(relative_position_index.astype('int32')),
-                trainable=False,
-                dtype=tf.int32,
-                name="relative_position_index"
-            )
+        # Store as numpy array for efficient lookup (not a trainable weight)
+        self.relative_position_index_np = relative_position_index.astype('int32')
 
     def call(self, x, mask=None):
         """
@@ -288,7 +281,7 @@ class WindowAttention(layers.Layer):
         # Add learnable relative position bias
         num_window_elements = self.window_size[0] * self.window_size[1]
         relative_position_index_flat = tf.reshape(
-            self.relative_position_index, shape=(-1,)
+            tf.constant(self.relative_position_index_np), shape=(-1,)
         )
         # Lookup relative position bias from the table
         relative_position_bias = tf.gather(
@@ -432,6 +425,7 @@ class SwinTransformerBlock(layers.Layer):
         """
         if self.shift_size == 0:
             self.attn_mask = None
+            self.attn_mask_np = None
         else:
             height, width = self.num_patch
             
@@ -468,14 +462,8 @@ class SwinTransformerBlock(layers.Layer):
             )
             attn_mask = tf.where(attn_mask != 0, -100.0, attn_mask)  # Mask different regions
             attn_mask = tf.where(attn_mask == 0, 0.0, attn_mask)      # Keep same region as 0
-            with tf.init_scope():
-                self.attn_mask = self.add_weight(
-                    shape=attn_mask.shape,
-                    initializer=tf.constant_initializer(attn_mask.numpy()),
-                    trainable=False,
-                    dtype=tf.float32,
-                    name="attn_mask"
-                )
+            # Store as numpy array for efficient lookup (not a trainable weight)
+            self.attn_mask_np = attn_mask.numpy().astype('float32')
 
     def call(self, x):
         """
@@ -526,7 +514,8 @@ class SwinTransformerBlock(layers.Layer):
         )
         
         # Apply window attention (with mask for SW-MSA)
-        attn_windows = self.attn(x_windows, mask=self.attn_mask)
+        mask_tensor = tf.constant(self.attn_mask_np) if self.attn_mask_np is not None else None
+        attn_windows = self.attn(x_windows, mask=mask_tensor)
 
         # Reconstruct from windows
         attn_windows = tf.reshape(
