@@ -250,13 +250,14 @@ class WindowAttention(layers.Layer):
         relative_position_index = relative_coords.sum(-1)
 
         # Store as non-trainable weight for efficient lookup
-        self.relative_position_index = self.add_weight(
-            shape=relative_position_index.shape,
-            initializer=tf.constant_initializer(relative_position_index.astype('int32')),
-            trainable=False,
-            dtype=tf.int32,
-            name="relative_position_index"
-        )
+        with tf.init_scope():
+            self.relative_position_index = self.add_weight(
+                shape=relative_position_index.shape,
+                initializer=tf.constant_initializer(relative_position_index.astype('int32')),
+                trainable=False,
+                dtype=tf.int32,
+                name="relative_position_index"
+            )
 
     def call(self, x, mask=None):
         """
@@ -467,13 +468,14 @@ class SwinTransformerBlock(layers.Layer):
             )
             attn_mask = tf.where(attn_mask != 0, -100.0, attn_mask)  # Mask different regions
             attn_mask = tf.where(attn_mask == 0, 0.0, attn_mask)      # Keep same region as 0
-            self.attn_mask = self.add_weight(
-                shape=attn_mask.shape,
-                initializer=tf.constant_initializer(attn_mask.numpy()),
-                trainable=False,
-                dtype=tf.float32,
-                name="attn_mask"
-            )
+            with tf.init_scope():
+                self.attn_mask = self.add_weight(
+                    shape=attn_mask.shape,
+                    initializer=tf.constant_initializer(attn_mask.numpy()),
+                    trainable=False,
+                    dtype=tf.float32,
+                    name="attn_mask"
+                )
 
     def call(self, x):
         """
