@@ -207,18 +207,11 @@ def build_swin_tiny(input_shape, num_classes=2, pretrained=False):
     
     inputs = keras.Input(shape=input_shape)
     
-    # Patch embedding
+    # Patch embedding - keeps spatial dimensions
     x = PatchEmbedding(patch_size=patch_size, embed_dim=embed_dim)(inputs)
+    # x shape: (B, H', W', embed_dim)
     
-    # Reshape to flatten spatial dimensions: (B, H', W', embed_dim) -> (B, H'*W', embed_dim)
-    def reshape_fn(x):
-        shape = tf.shape(x)
-        B, H, W, C = shape[0], shape[1], shape[2], shape[3]
-        return tf.reshape(x, [B, H * W, C])
-    
-    x = layers.Lambda(reshape_fn)(x)
-    
-    # Swin layers
+    # Swin layers - process with spatial dimensions maintained
     current_dim = embed_dim
     for stage_idx, (depth, num_head) in enumerate(zip(depths, num_heads)):
         for block_idx in range(depth):
@@ -229,18 +222,19 @@ def build_swin_tiny(input_shape, num_classes=2, pretrained=False):
                 mlp_ratio=4.0,
                 drop=0.1,
                 attn_drop=0.0,
-                drop_path=0.1
+                drop_path=0.1,
+                name=f"swin_block_s{stage_idx}_b{block_idx}"
             )(x)
         
         if stage_idx < len(depths) - 1:
-            # Patch merging
+            # Patch merging - reduce spatial size, increase channels
             current_dim = current_dim * 2
-            # Simplified patch merging (reduces spatial dims)
-            x = layers.Dense(current_dim)(x)
+            # Simple projection to new dimension
+            x = layers.Conv2D(current_dim, kernel_size=2, strides=2, padding='valid')(x)
     
     # Classification head
     x = layers.LayerNormalization(epsilon=1e-5)(x)
-    x = layers.GlobalAveragePooling1D()(x)
+    x = layers.GlobalAveragePooling2D()(x)
     x = layers.Dense(num_classes, activation='softmax')(x)
     
     model = keras.Model(inputs=inputs, outputs=x, name='SwinTiny')
