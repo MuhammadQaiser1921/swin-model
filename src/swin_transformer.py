@@ -52,25 +52,19 @@ class WindowAttention(layers.Layer):
             trainable=True
         )
         
-        # Precompute relative positions
-        coords_h = tf.range(window_size)
-        coords_w = tf.range(window_size)
-        coords = tf.stack(tf.meshgrid(coords_h, coords_w, indexing='ij'))  # 2, ws, ws
-        coords_flatten = tf.reshape(tf.transpose(coords, [1, 2, 0]), [-1, 2])  # ws*ws, 2
+        # Precompute relative positions using numpy (avoid device placement issues)
+        coords_h = np.arange(window_size)
+        coords_w = np.arange(window_size)
+        coords = np.stack(np.meshgrid(coords_h, coords_w, indexing='ij'))  # 2, ws, ws
+        coords_flatten = coords.transpose(1, 2, 0).reshape(-1, 2)  # ws*ws, 2
         relative_coords = coords_flatten[:, None, :] - coords_flatten[None, :, :]  # ws*ws, ws*ws, 2
-        relative_coords = tf.cast(relative_coords, tf.float32)
+        relative_coords[:, :, 0] += window_size - 1
+        relative_coords[:, :, 1] += window_size - 1
+        relative_coords[:, :, 0] *= 2 * window_size - 1
+        relative_position_index = relative_coords.sum(-1)  # ws*ws, ws*ws
         
-        # Use tensor operations instead of item assignment
-        h_offset = tf.constant([window_size - 1, 0], dtype=tf.float32)
-        relative_coords = relative_coords + tf.reshape(h_offset, [1, 1, 2])
-        
-        # Compute linear index
-        relative_coords_0 = tf.cast(relative_coords[:, :, 0], tf.int32)
-        relative_coords_1 = tf.cast(relative_coords[:, :, 1], tf.int32)
-        relative_position_index = relative_coords_0 * (2 * window_size - 1) + relative_coords_1
-        
-        # Store as numpy constant (will be on correct device when used)
-        self.relative_position_index = relative_position_index.numpy()
+        # Store as numpy array (will be converted to constant tensor when used)
+        self.relative_position_index = relative_position_index.astype(np.int32)
         
         self.qkv = layers.Dense(dim * 3, use_bias=True)
         self.attn_drop = layers.Dropout(attn_drop)

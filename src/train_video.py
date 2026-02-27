@@ -5,6 +5,33 @@ Deepfake frame dataset training script
 Trains Swin-Tiny on pre-extracted frames from:
 - FaceForensics++ extracted frames (train/val/test with numeric class folders)
 - Deepfake_Dataset extracted frames (train/valid/test with class name folders)
+
+Usage Examples:
+---------------
+
+1. Complete training pipeline (one-shot):
+    ```python
+    model, history, auc_metrics = train_video_model()
+    ```
+
+2. Iterative development (load data once, rebuild model multiple times):
+    ```python
+    # Step 1: Load data once
+    data = load_data()
+    
+    # Step 2: Prepare datasets once
+    train_ds, val_ds, test_ds = prepare_datasets(data)
+    
+    # Step 3: Build/rebuild model as needed
+    model = build_and_compile_model()
+    
+    # Step 4: Train
+    history = train_model(model, train_ds, val_ds)
+    
+    # Step 5: Iterate - rebuild and retrain without reloading data
+    model = build_and_compile_model()  # Modify swin_transformer.py
+    history = train_model(model, train_ds, val_ds)
+    ```
 """
 
 import os
@@ -355,25 +382,15 @@ def create_callbacks(model_name="swin_tiny_video"):
 
 # ========== MAIN TRAINING FUNCTION ==========
 
-def train_video_model():
+def load_data():
     """
-    Main training pipeline for FaceForensics++ video model.
-    """
-    print("\n" + "="*60)
-    print("SWIN-TINY VIDEO MODEL TRAINING")
-    print("FaceForensics++ Dataset (C23 Compression)")
-    print("="*60)
+    Load and split data into train/val/test sets.
+    Call this once and reuse the returned data.
     
-    # Print configuration
-    print("\n📋 Configuration:")
-    print(f"  FF++ frames root: {Config.FFPP_FRAMES_ROOT}")
-    print(f"  Deepfake frames root: {Config.DEEPFAKE_FRAMES_ROOT}")
-    print(f"  Image size: {Config.IMG_SIZE}x{Config.IMG_SIZE}")
-    print(f"  Batch size: {Config.BATCH_SIZE}")
-    print(f"  Epochs: {Config.EPOCHS}")
-    print(f"  Learning rate: {Config.INITIAL_LR}")
-    print(f"  Validation split: {Config.VAL_SPLIT}")
-    print(f"  Data augmentation: {Config.AUGMENTATION}")
+    Returns:
+        dict: Contains train_paths, train_labels, val_paths, val_labels, test_paths, test_labels
+    """
+    print("\n📂 Loading data...")
     
     # Load extracted frame paths
     paths = load_extracted_frame_paths()
@@ -387,7 +404,7 @@ def train_video_model():
 
     if len(train_paths) == 0:
         print("❌ Error: No training data found. Check dataset roots and split folders.")
-        return
+        return None
 
     # If val split is missing, create it from train split
     if len(val_paths) == 0:
@@ -402,26 +419,68 @@ def train_video_model():
     print(f"\n📊 Data split:")
     print(f"  Training samples: {len(train_paths)}")
     print(f"  Validation samples: {len(val_paths)}")
+    print(f"  Test samples: {len(test_paths)}")
     print(f"  Train fake/real: {np.sum(train_labels == 1)}/{np.sum(train_labels == 0)}")
     print(f"  Val fake/real: {np.sum(val_labels == 1)}/{np.sum(val_labels == 0)}")
+    
+    return {
+        'train_paths': train_paths,
+        'train_labels': train_labels,
+        'val_paths': val_paths,
+        'val_labels': val_labels,
+        'test_paths': test_paths,
+        'test_labels': test_labels
+    }
 
-    # Create TensorFlow datasets
+
+def prepare_datasets(data):
+    """
+    Create TensorFlow datasets from loaded data.
+    
+    Args:
+        data: Dict from load_data() containing paths and labels
+    
+    Returns:
+        tuple: (train_dataset, val_dataset, test_dataset)
+    """
+    print("\n🔄 Preparing TensorFlow datasets...")
+    
     train_dataset = build_image_dataset(
-        train_paths,
-        train_labels,
+        data['train_paths'],
+        data['train_labels'],
         batch_size=Config.BATCH_SIZE,
         shuffle=True,
         augment=True,
     )
     val_dataset = build_image_dataset(
-        val_paths,
-        val_labels,
+        data['val_paths'],
+        data['val_labels'],
         batch_size=Config.BATCH_SIZE,
         shuffle=False,
         augment=False,
     )
     
-    # Build model
+    test_dataset = None
+    if len(data['test_paths']) > 0:
+        test_dataset = build_image_dataset(
+            data['test_paths'],
+            data['test_labels'],
+            batch_size=Config.BATCH_SIZE,
+            shuffle=False,
+            augment=False,
+        )
+    
+    print("✓ Datasets prepared")
+    return train_dataset, val_dataset, test_dataset
+
+
+def build_and_compile_model():
+    """
+    Build and compile the Swin-Tiny model.
+    
+    Returns:
+        Compiled Keras model
+    """
     print(f"\n🏗️ Building Swin-Tiny model...")
     model = build_swin_tiny(
         input_shape=Config.INPUT_SHAPE,
@@ -452,7 +511,21 @@ def train_video_model():
     )
     
     print(f"\n✓ Model compiled successfully!")
+    return model
+
+
+def train_model(model, train_dataset, val_dataset):
+    """
+    Train the model.
     
+    Args:
+        model: Compiled Keras model
+        train_dataset: Training tf.data.Dataset
+        val_dataset: Validation tf.data.Dataset
+    
+    Returns:
+        History object from model.fit()
+    """
     # Create callbacks
     callbacks = create_callbacks()
     
@@ -467,6 +540,48 @@ def train_video_model():
         verbose=1
     )
     
+    return history
+
+
+def train_video_model():
+    """
+    Complete training pipeline - loads data, builds model, and trains.
+    For iterative development, use the separate functions instead:
+    1. data = load_data()  # Call once
+    2. train_ds, val_ds, test_ds = prepare_datasets(data)  # Call once
+    3. model = build_and_compile_model()  # Rebuild as needed
+    4. history = train_model(model, train_ds, val_ds)  # Train as needed
+    """
+    print("\n" + "="*60)
+    print("SWIN-TINY VIDEO MODEL TRAINING")
+    print("FaceForensics++ Dataset (C23 Compression)")
+    print("="*60)
+    
+    # Print configuration
+    print("\n📋 Configuration:")
+    print(f"  FF++ frames root: {Config.FFPP_FRAMES_ROOT}")
+    print(f"  Deepfake frames root: {Config.DEEPFAKE_FRAMES_ROOT}")
+    print(f"  Image size: {Config.IMG_SIZE}x{Config.IMG_SIZE}")
+    print(f"  Batch size: {Config.BATCH_SIZE}")
+    print(f"  Epochs: {Config.EPOCHS}")
+    print(f"  Learning rate: {Config.INITIAL_LR}")
+    print(f"  Validation split: {Config.VAL_SPLIT}")
+    print(f"  Data augmentation: {Config.AUGMENTATION}")
+    
+    # Load data
+    data = load_data()
+    if data is None:
+        return
+    
+    # Prepare datasets
+    train_dataset, val_dataset, test_dataset = prepare_datasets(data)
+    
+    # Build and compile model
+    model = build_and_compile_model()
+    
+    # Train model
+    history = train_model(model, train_dataset, val_dataset)
+    
     # ===== EVALUATION & AUC COMPUTATION =====
     print(f"\n📊 Computing AUC and other metrics on validation set...")
     
@@ -475,7 +590,7 @@ def train_video_model():
     y_val_pred_probs = y_val_pred_probs[:, 1]  # Get probabilities for class 1 (fake)
     
     # Compute AUC metrics
-    auc_metrics = compute_auc_metrics(val_labels, y_val_pred_probs)
+    auc_metrics = compute_auc_metrics(data['val_labels'], y_val_pred_probs)
     
     # Save final model
     final_model_path = os.path.join(
@@ -540,18 +655,11 @@ def train_video_model():
     print("="*60 + "\n")
     
     # Also compute test metrics if we have test data
-    if len(test_paths) > 0:
+    if len(data['test_paths']) > 0:
         print("📊 Computing AUC on test set...")
-        test_dataset = build_image_dataset(
-            test_paths,
-            test_labels,
-            batch_size=Config.BATCH_SIZE,
-            shuffle=False,
-            augment=False,
-        )
         y_test_pred_probs = model.predict(test_dataset)
         y_test_pred_probs = y_test_pred_probs[:, 1]
-        test_auc_metrics = compute_auc_metrics(test_labels, y_test_pred_probs)
+        test_auc_metrics = compute_auc_metrics(data['test_labels'], y_test_pred_probs)
         
         print(f"\nTest Set AUC-ROC: {test_auc_metrics['auc_roc']:.4f}")
         print(f"Test Set PR-AUC: {test_auc_metrics['pr_auc']:.4f}\n")
