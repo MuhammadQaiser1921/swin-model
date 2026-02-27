@@ -66,7 +66,8 @@ class WindowAttention(layers.Layer):
         relative_coords[:, :, 0] *= 2 * window_size - 1
         relative_position_index = relative_coords.sum(-1).astype(np.int32)
         
-        # Store as a non-trainable weight/variable to ensure it's handled by the graph correctly
+        # Store as a non-trainable weight to ensure each layer instance 
+        # has its own index tracked correctly in the computation graph.
         self.relative_position_index = self.add_weight(
             name='relative_position_index',
             shape=relative_position_index.shape,
@@ -90,7 +91,6 @@ class WindowAttention(layers.Layer):
         qkv = tf.transpose(qkv, [2, 0, 3, 1, 4]) 
         
         q, k, v = qkv[0], qkv[1], qkv[2]
-        
         attn = (q @ tf.transpose(k, [0, 1, 3, 2])) * self.scale
         
         # Gather bias and reshape to [num_heads, N, N]
@@ -122,7 +122,7 @@ class WindowAttention(layers.Layer):
 
 
 class SwinTransformerBlock(layers.Layer):
-    """Swin Transformer Block"""
+    """Swin Transformer Block with dynamic resolution handling"""
     
     def __init__(self, dim, num_heads, window_size=7, mlp_ratio=4., 
                  drop=0., attn_drop=0., drop_path=0., **kwargs):
@@ -177,6 +177,7 @@ class PatchMerging(layers.Layer):
         self.norm = layers.LayerNormalization(epsilon=1e-5)
     
     def call(self, x):
+        # Downsample by factor of 2 dynamically
         x0 = x[:, 0::2, 0::2, :]
         x1 = x[:, 1::2, 0::2, :]
         x2 = x[:, 0::2, 1::2, :]
@@ -207,9 +208,15 @@ class PatchEmbedding(layers.Layer):
         return x
 
 
-def build_swin_tiny(input_shape, num_classes=2, pretrained=False):
-    """Build Swin-Tiny for deepfake detection"""
-    print("✓ Building Swin-Tiny Transformer")
+def build_swin_tiny(input_shape, num_classes=2):
+    """
+    Build Swin-Tiny for deepfake detection (Video or Audio).
+    
+    Args:
+        input_shape: Tuple (height, width, channels)
+        num_classes: Number of output classes
+    """
+    print(f"✓ Building Swin-Tiny Transformer for input shape: {input_shape}")
     
     patch_size = 4
     embed_dim = 96
@@ -218,6 +225,9 @@ def build_swin_tiny(input_shape, num_classes=2, pretrained=False):
     window_size = 7
     
     inputs = keras.Input(shape=input_shape)
+    
+    # Optional: Handle single channel audio by expanding to 3 if needed
+    # (Though Swin can process single channel if kernel_size is adjusted)
     x = PatchEmbedding(patch_size=patch_size, embed_dim=embed_dim)(inputs)
     
     current_dim = embed_dim
@@ -242,5 +252,5 @@ def build_swin_tiny(input_shape, num_classes=2, pretrained=False):
     x = layers.GlobalAveragePooling2D()(x)
     outputs = layers.Dense(num_classes, activation='softmax')(x)
     
-    model = keras.Model(inputs=inputs, outputs=outputs, name='SwinTiny')
+    model = keras.Model(inputs=inputs, outputs=outputs, name='Swin-Tiny')
     return model
