@@ -89,7 +89,7 @@ class WindowAttention(layers.Layer):
         )
         relative_position_bias = tf.reshape(
             relative_position_bias,
-            (self.window_size * self.window_size, self.window_size * self.window_size, -1)
+            [N, N, self.num_heads]
         )
         relative_position_bias = tf.transpose(relative_position_bias, [2, 0, 1])
         attn = attn + tf.expand_dims(relative_position_bias, 0)
