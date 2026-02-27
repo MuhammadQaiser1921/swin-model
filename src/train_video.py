@@ -12,7 +12,7 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
-from model_factory import build_swin_tiny
+from swin_transformer import build_swin_tiny
 from video_train_config import Config
 from sklearn.model_selection import train_test_split
 import json
