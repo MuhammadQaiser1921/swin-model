@@ -204,12 +204,13 @@ def build_swin_tiny(input_shape, num_classes=2, pretrained=False):
     # Patch embedding
     x = PatchEmbedding(patch_size=patch_size, embed_dim=embed_dim)(inputs)
     
-    # Store dimensions for later
-    B = tf.shape(x)[0]
-    H = tf.shape(x)[1]
-    W = tf.shape(x)[2]
+    # Reshape to flatten spatial dimensions: (B, H', W', embed_dim) -> (B, H'*W', embed_dim)
+    def reshape_fn(x):
+        shape = tf.shape(x)
+        B, H, W, C = shape[0], shape[1], shape[2], shape[3]
+        return tf.reshape(x, [B, H * W, C])
     
-    x = tf.reshape(x, [B, H*W, embed_dim])
+    x = layers.Lambda(reshape_fn)(x)
     
     # Swin layers
     current_dim = embed_dim
