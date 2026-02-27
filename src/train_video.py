@@ -424,13 +424,11 @@ def train_video_model():
     print("\n📋 Configuration:")
     print(f"  FF++ frames root: {Config.FFPP_FRAMES_ROOT}")
     print(f"  Deepfake frames root: {Config.DEEPFAKE_FRAMES_ROOT}")
-    print(f"  Frames per video: {Config.FRAMES_PER_VIDEO}")
     print(f"  Image size: {Config.IMG_SIZE}x{Config.IMG_SIZE}")
     print(f"  Batch size: {Config.BATCH_SIZE}")
     print(f"  Epochs: {Config.EPOCHS}")
     print(f"  Learning rate: {Config.INITIAL_LR}")
     print(f"  Validation split: {Config.VAL_SPLIT}")
-    print(f"  Face detection: {Config.FACE_DETECTION}")
     print(f"  Data augmentation: {Config.AUGMENTATION}")
     
     # Load extracted frame paths
