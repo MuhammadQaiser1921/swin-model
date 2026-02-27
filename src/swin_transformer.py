@@ -1,6 +1,6 @@
 """
 Swin Transformer implementation for TensorFlow/Keras
-Designed to be compatible with timm pretrained weights
+Designed to be compatible with both Video and Audio inputs.
 """
 
 import tensorflow as tf
@@ -10,7 +10,7 @@ import numpy as np
 
 
 def window_partition(x, window_size):
-    """Partition x into windows with shape (num_windows*B, window_size, window_size, C)"""
+    """Partition x into windows: (B, H, W, C) -> (num_windows*B, ws, ws, C)"""
     B = tf.shape(x)[0]
     H = tf.shape(x)[1]
     W = tf.shape(x)[2]
@@ -20,19 +20,17 @@ def window_partition(x, window_size):
     x = tf.reshape(x, [B, H // ws, ws, W // ws, ws, C])
     x = tf.transpose(x, [0, 1, 3, 2, 4, 5])
     x = tf.reshape(x, [-1, ws, ws, C])
-    
     return x
 
 
 def window_unpartition(windows, window_size, H, W):
-    """Reverse of window_partition"""
+    """Reverse partition: (num_windows*B, ws, ws, C) -> (B, H, W, C)"""
     B = tf.shape(windows)[0] // (H // window_size) // (W // window_size)
     ws = window_size
     
     x = tf.reshape(windows, [B, H // ws, W // ws, ws, ws, -1])
     x = tf.transpose(x, [0, 1, 3, 2, 4, 5])
     x = tf.reshape(x, [B, H, W, -1])
-    
     return x
 
 
@@ -55,7 +53,7 @@ class WindowAttention(layers.Layer):
             trainable=True
         )
         
-        # Precompute relative positions using numpy
+        # Precompute relative position index using numpy
         coords_h = np.arange(window_size)
         coords_w = np.arange(window_size)
         coords = np.stack(np.meshgrid(coords_h, coords_w, indexing='ij')) 
@@ -66,8 +64,7 @@ class WindowAttention(layers.Layer):
         relative_coords[:, :, 0] *= 2 * window_size - 1
         relative_position_index = relative_coords.sum(-1).astype(np.int32)
         
-        # Store as a non-trainable weight to ensure each layer instance 
-        # has its own index tracked correctly in the computation graph.
+        # FIX: Register index as a non-trainable weight to ensure proper GPU placement
         self.relative_position_index = self.add_weight(
             name='relative_position_index',
             shape=relative_position_index.shape,
@@ -93,7 +90,7 @@ class WindowAttention(layers.Layer):
         q, k, v = qkv[0], qkv[1], qkv[2]
         attn = (q @ tf.transpose(k, [0, 1, 3, 2])) * self.scale
         
-        # Gather bias and reshape to [num_heads, N, N]
+        # Gather bias: Indexing is now on the same device as the bias table
         relative_position_bias = tf.gather(
             self.relative_position_bias_table,
             tf.reshape(self.relative_position_index, [-1])
@@ -111,13 +108,8 @@ class WindowAttention(layers.Layer):
         attn = tf.nn.softmax(attn, axis=-1)
         attn = self.attn_drop(attn, training=training)
         
-        x = (attn @ v) 
-        x = tf.transpose(x, [0, 2, 1, 3])
-        x = tf.reshape(x, [B_, N, C])
-        
-        x = self.proj(x)
-        x = self.proj_drop(x, training=training)
-        
+        x = tf.reshape(tf.transpose(attn @ v, [0, 2, 1, 3]), [B_, N, C])
+        x = self.proj_drop(self.proj(x), training=training)
         return x
 
 
@@ -138,9 +130,8 @@ class SwinTransformerBlock(layers.Layer):
         )
         
         self.norm2 = layers.LayerNormalization(epsilon=1e-5)
-        mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = keras.Sequential([
-            layers.Dense(mlp_hidden_dim, activation='gelu'),
+            layers.Dense(int(dim * mlp_ratio), activation='gelu'),
             layers.Dropout(drop),
             layers.Dense(dim),
             layers.Dropout(drop)
@@ -149,8 +140,7 @@ class SwinTransformerBlock(layers.Layer):
         self.drop_path = layers.Dropout(drop_path) if drop_path > 0. else layers.Identity()
     
     def call(self, x, training=False):
-        H = tf.shape(x)[1]
-        W = tf.shape(x)[2]
+        H, W = tf.shape(x)[1], tf.shape(x)[2]
         C = tf.shape(x)[3]
         
         x_norm = self.norm1(x)
@@ -163,12 +153,11 @@ class SwinTransformerBlock(layers.Layer):
         
         x = x + self.drop_path(x_attn, training=training)
         x = x + self.drop_path(self.mlp(self.norm2(x), training=training), training=training)
-        
         return x
 
 
 class PatchMerging(layers.Layer):
-    """Patch Merging Layer - reduces spatial resolution and increases channels"""
+    """Dynamic resolution reduction and channel expansion layer"""
     
     def __init__(self, dim, **kwargs):
         super().__init__(**kwargs)
@@ -177,7 +166,6 @@ class PatchMerging(layers.Layer):
         self.norm = layers.LayerNormalization(epsilon=1e-5)
     
     def call(self, x):
-        # Downsample by factor of 2 dynamically
         x0 = x[:, 0::2, 0::2, :]
         x1 = x[:, 1::2, 0::2, :]
         x2 = x[:, 0::2, 1::2, :]
@@ -185,13 +173,11 @@ class PatchMerging(layers.Layer):
         
         x = tf.concat([x0, x1, x2, x3], axis=-1)
         x = self.norm(x)
-        x = self.reduction(x)
-        
-        return x
+        return self.reduction(x)
 
 
 class PatchEmbedding(layers.Layer):
-    """Patch embedding layer"""
+    """Initial patch embedding layer"""
     
     def __init__(self, patch_size=4, embed_dim=96, **kwargs):
         super().__init__(**kwargs)
@@ -210,15 +196,11 @@ class PatchEmbedding(layers.Layer):
 
 def build_swin_tiny(input_shape, num_classes=2):
     """
-    Build Swin-Tiny for deepfake detection (Video or Audio).
-    
-    Args:
-        input_shape: Tuple (height, width, channels)
-        num_classes: Number of output classes
+    Constructs the Swin-Tiny architecture.
+    Works for both Video (224, 224, 3) and Audio (128, 128, 1) inputs.
     """
-    print(f"✓ Building Swin-Tiny Transformer for input shape: {input_shape}")
+    print(f"✓ Building Swin-Tiny Transformer for shape: {input_shape}")
     
-    patch_size = 4
     embed_dim = 96
     depths = [2, 2, 6, 2]
     num_heads = [3, 6, 12, 24]
@@ -226,9 +208,12 @@ def build_swin_tiny(input_shape, num_classes=2):
     
     inputs = keras.Input(shape=input_shape)
     
-    # Optional: Handle single channel audio by expanding to 3 if needed
-    # (Though Swin can process single channel if kernel_size is adjusted)
-    x = PatchEmbedding(patch_size=patch_size, embed_dim=embed_dim)(inputs)
+    # Optional: If audio input is 1D/single-channel, expand it to 3 for standard processing
+    x = inputs
+    if input_shape[-1] == 1:
+        x = layers.Conv2D(3, kernel_size=1)(x)
+
+    x = PatchEmbedding(patch_size=4, embed_dim=embed_dim)(x)
     
     current_dim = embed_dim
     for stage_idx, (depth, num_head) in enumerate(zip(depths, num_heads)):
@@ -237,9 +222,7 @@ def build_swin_tiny(input_shape, num_classes=2):
                 dim=current_dim,
                 num_heads=num_head,
                 window_size=window_size,
-                mlp_ratio=4.0,
                 drop=0.1,
-                attn_drop=0.0,
                 drop_path=0.1,
                 name=f"swin_block_s{stage_idx}_b{block_idx}"
             )(x)
@@ -252,5 +235,4 @@ def build_swin_tiny(input_shape, num_classes=2):
     x = layers.GlobalAveragePooling2D()(x)
     outputs = layers.Dense(num_classes, activation='softmax')(x)
     
-    model = keras.Model(inputs=inputs, outputs=outputs, name='Swin-Tiny')
-    return model
+    return keras.Model(inputs=inputs, outputs=outputs, name='SwinTiny')
