@@ -160,6 +160,40 @@ class SwinTransformerBlock(layers.Layer):
         return x
 
 
+class PatchMerging(layers.Layer):
+    """Patch Merging Layer - reduces spatial resolution and increases channels"""
+    
+    def __init__(self, dim, **kwargs):
+        super().__init__(**kwargs)
+        self.dim = dim
+        self.reduction = layers.Dense(2 * dim, use_bias=False)
+        self.norm = layers.LayerNormalization(epsilon=1e-5)
+    
+    def call(self, x):
+        """
+        x: (B, H, W, C)
+        """
+        B = tf.shape(x)[0]
+        H = tf.shape(x)[1]
+        W = tf.shape(x)[2]
+        C = tf.shape(x)[3]
+        
+        # Downsample by factor of 2 by taking every other pixel in 4 groups
+        x0 = x[:, 0::2, 0::2, :]  # (B, H/2, W/2, C)
+        x1 = x[:, 1::2, 0::2, :]  # (B, H/2, W/2, C)
+        x2 = x[:, 0::2, 1::2, :]  # (B, H/2, W/2, C)
+        x3 = x[:, 1::2, 1::2, :]  # (B, H/2, W/2, C)
+        
+        # Concatenate along channel dimension
+        x = tf.concat([x0, x1, x2, x3], axis=-1)  # (B, H/2, W/2, 4*C)
+        
+        # Apply normalization and linear projection
+        x = self.norm(x)
+        x = self.reduction(x)  # (B, H/2, W/2, 2*C)
+        
+        return x
+
+
 class PatchEmbedding(layers.Layer):
     """Patch embedding layer"""
     
@@ -222,9 +256,8 @@ def build_swin_tiny(input_shape, num_classes=2, pretrained=False):
         
         if stage_idx < len(depths) - 1:
             # Patch merging - reduce spatial size, increase channels
+            x = PatchMerging(dim=current_dim, name=f"patch_merge_{stage_idx}")(x)
             current_dim = current_dim * 2
-            # Simple projection to new dimension
-            x = layers.Conv2D(current_dim, kernel_size=2, strides=2, padding='valid')(x)
     
     # Classification head
     x = layers.LayerNormalization(epsilon=1e-5)(x)
