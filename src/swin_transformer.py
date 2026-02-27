@@ -52,20 +52,18 @@ class WindowAttention(layers.Layer):
             trainable=True
         )
         
-        # Precompute relative positions using numpy (avoid device placement issues)
-        coords_h = np.arange(window_size)
-        coords_w = np.arange(window_size)
-        coords = np.stack(np.meshgrid(coords_h, coords_w, indexing='ij'))  # 2, ws, ws
-        coords_flatten = coords.transpose(1, 2, 0).reshape(-1, 2)  # ws*ws, 2
-        relative_coords = coords_flatten[:, None, :] - coords_flatten[None, :, :]  # ws*ws, ws*ws, 2
-        relative_coords[:, :, 0] += window_size - 1
-        relative_coords[:, :, 1] += window_size - 1
-        relative_coords[:, :, 0] *= 2 * window_size - 1
-        relative_position_index = relative_coords.sum(-1)  # ws*ws, ws*ws
-        
-        # Store as numpy array (will be converted to constant tensor when used)
-        self.relative_position_index = relative_position_index.astype(np.int32)
-        
+        # Precompute relative positions and store as a non-trainable constant
+        with tf.init_scope():
+            coords_h = tf.range(window_size, dtype=tf.int32)
+            coords_w = tf.range(window_size, dtype=tf.int32)
+            coords = tf.stack(tf.meshgrid(coords_h, coords_w, indexing='ij'))
+            coords_flatten = tf.reshape(tf.transpose(coords, [1, 2, 0]), [-1, 2])
+            relative_coords = coords_flatten[:, None, :] - coords_flatten[None, :, :]
+            relative_coords = relative_coords + (window_size - 1)
+            relative_coords = relative_coords * (2 * window_size - 1)
+            relative_position_index = tf.reduce_sum(relative_coords, axis=-1)
+            self.relative_position_index = tf.constant(relative_position_index, dtype=tf.int32)
+
         self.qkv = layers.Dense(dim * 3, use_bias=True)
         self.attn_drop = layers.Dropout(attn_drop)
         self.proj = layers.Dense(dim)
@@ -87,11 +85,11 @@ class WindowAttention(layers.Layer):
         # Add relative position bias
         relative_position_bias = tf.gather(
             self.relative_position_bias_table,
-            tf.reshape(tf.constant(self.relative_position_index, dtype=tf.int32), [-1])
+            tf.reshape(self.relative_position_index, [-1])
         )
         relative_position_bias = tf.reshape(
             relative_position_bias,
-            [N, N, self.num_heads]
+            (self.window_size * self.window_size, self.window_size * self.window_size, -1)
         )
         relative_position_bias = tf.transpose(relative_position_bias, [2, 0, 1])
         attn = attn + tf.expand_dims(relative_position_bias, 0)

@@ -41,37 +41,13 @@ from tensorflow import keras
 from tensorflow.keras import layers
 from swin_transformer import build_swin_tiny
 from video_train_config import Config
-from sklearn.model_selection import train_test_split
+from data_loader import load_data, prepare_datasets
 import json
 from datetime import datetime
 
 
-def _collect_image_paths(split_root, class_map, image_exts, max_per_class=None):
-    paths = []
-    labels = []
+# ========== HELPER FUNCTIONS ==========
 
-    if not os.path.exists(split_root):
-        return paths, labels
-
-    for class_name, label in class_map.items():
-        class_dir = os.path.join(split_root, class_name)
-        if not os.path.exists(class_dir):
-            continue
-
-        collected = 0
-        for root, _, files in os.walk(class_dir):
-            for name in sorted(files):
-                if not name.lower().endswith(image_exts):
-                    continue
-                paths.append(os.path.join(root, name))
-                labels.append(label)
-                collected += 1
-                if max_per_class and collected >= max_per_class:
-                    break
-            if max_per_class and collected >= max_per_class:
-                break
-
-    return paths, labels
 
 
 def load_extracted_frame_paths():

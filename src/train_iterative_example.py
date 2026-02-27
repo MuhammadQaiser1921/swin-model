@@ -13,7 +13,7 @@ Steps:
 # ============================================================
 # CELL 1: Load Data (RUN ONCE)
 # ============================================================
-from train_video import load_data
+from data_loader import load_data
 
 print("Loading data...")
 data = load_data()
@@ -28,7 +28,7 @@ print("✓ Data loaded and cached")
 # ============================================================
 # CELL 2: Prepare Datasets (RUN ONCE)
 # ============================================================
-from train_video import prepare_datasets
+from data_loader import prepare_datasets
 
 print("Preparing datasets...")
 train_ds, val_ds, test_ds = prepare_datasets(data)
