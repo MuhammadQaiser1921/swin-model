@@ -11,7 +11,10 @@ import numpy as np
 
 def window_partition(x, window_size):
     """Partition x into windows with shape (num_windows*B, window_size, window_size, C)"""
-    B, H, W, C = tf.shape(x)[0], tf.shape(x)[1], tf.shape(x)[2], tf.shape(x)[3]
+    B = tf.shape(x)[0]
+    H = tf.shape(x)[1]
+    W = tf.shape(x)[2]
+    C = tf.shape(x)[3]
     ws = window_size
     
     x = tf.reshape(x, [B, H // ws, ws, W // ws, ws, C])
@@ -52,19 +55,25 @@ class WindowAttention(layers.Layer):
             trainable=True
         )
         
-        # Precompute relative positions entirely with numpy to avoid device placement issues
+        # Precompute relative positions using numpy
         coords_h = np.arange(window_size)
         coords_w = np.arange(window_size)
-        coords = np.stack(np.meshgrid(coords_h, coords_w, indexing='ij'))  # 2, ws, ws
-        coords_flatten = coords.transpose(1, 2, 0).reshape(-1, 2)  # ws*ws, 2
-        relative_coords = coords_flatten[:, None, :] - coords_flatten[None, :, :]  # ws*ws, ws*ws, 2
+        coords = np.stack(np.meshgrid(coords_h, coords_w, indexing='ij')) 
+        coords_flatten = coords.transpose(1, 2, 0).reshape(-1, 2)
+        relative_coords = coords_flatten[:, None, :] - coords_flatten[None, :, :]
         relative_coords[:, :, 0] += window_size - 1
         relative_coords[:, :, 1] += window_size - 1
         relative_coords[:, :, 0] *= 2 * window_size - 1
-        relative_position_index = relative_coords.sum(-1).astype(np.int64)  # ws*ws, ws*ws
+        relative_position_index = relative_coords.sum(-1).astype(np.int32)
         
-        # Store as numpy array - will be converted to constant in call()
-        self.relative_position_index = relative_position_index
+        # Store as a non-trainable weight/variable to ensure it's handled by the graph correctly
+        self.relative_position_index = self.add_weight(
+            name='relative_position_index',
+            shape=relative_position_index.shape,
+            initializer=keras.initializers.Constant(relative_position_index),
+            trainable=False,
+            dtype='int32'
+        )
 
         self.qkv = layers.Dense(dim * 3, use_bias=True)
         self.attn_drop = layers.Dropout(attn_drop)
@@ -72,23 +81,22 @@ class WindowAttention(layers.Layer):
         self.proj_drop = layers.Dropout(proj_drop)
     
     def call(self, x, mask=None, training=False):
-        B, N, C = tf.shape(x)[0], tf.shape(x)[1], tf.shape(x)[2]
+        B_ = tf.shape(x)[0]
+        N = tf.shape(x)[1]
+        C = tf.shape(x)[2]
         
-        # Linear projection for Q, K, V
-        qkv = self.qkv(x)  # B, N, 3*dim
-        qkv = tf.reshape(qkv, [B, N, 3, self.num_heads, self.head_dim])
-        qkv = tf.transpose(qkv, [2, 0, 3, 1, 4])  # 3, B, num_heads, N, head_dim
+        qkv = self.qkv(x)
+        qkv = tf.reshape(qkv, [B_, N, 3, self.num_heads, self.head_dim])
+        qkv = tf.transpose(qkv, [2, 0, 3, 1, 4]) 
         
         q, k, v = qkv[0], qkv[1], qkv[2]
         
-        # Attention
-        attn = (q @ tf.transpose(k, [0, 1, 3, 2])) * self.scale  # B, num_heads, N, N
+        attn = (q @ tf.transpose(k, [0, 1, 3, 2])) * self.scale
         
-        # Add relative position bias
-        # Convert numpy index to tensor on-the-fly (avoids device placement issues)
+        # Gather bias and reshape to [num_heads, N, N]
         relative_position_bias = tf.gather(
             self.relative_position_bias_table,
-            tf.reshape(tf.constant(self.relative_position_index, dtype=tf.int32), [-1])
+            tf.reshape(self.relative_position_index, [-1])
         )
         relative_position_bias = tf.reshape(
             relative_position_bias,
@@ -103,9 +111,9 @@ class WindowAttention(layers.Layer):
         attn = tf.nn.softmax(attn, axis=-1)
         attn = self.attn_drop(attn, training=training)
         
-        x = (attn @ v)  # B, num_heads, N, head_dim
-        x = tf.transpose(x, [0, 2, 1, 3])  # B, N, num_heads, head_dim
-        x = tf.reshape(x, [B, N, C])
+        x = (attn @ v) 
+        x = tf.transpose(x, [0, 2, 1, 3])
+        x = tf.reshape(x, [B_, N, C])
         
         x = self.proj(x)
         x = self.proj_drop(x, training=training)
@@ -141,9 +149,10 @@ class SwinTransformerBlock(layers.Layer):
         self.drop_path = layers.Dropout(drop_path) if drop_path > 0. else layers.Identity()
     
     def call(self, x, training=False):
-        B, H, W, C = tf.shape(x)[0], tf.shape(x)[1], tf.shape(x)[2], tf.shape(x)[3]
+        H = tf.shape(x)[1]
+        W = tf.shape(x)[2]
+        C = tf.shape(x)[3]
         
-        # Window attention
         x_norm = self.norm1(x)
         x_partitioned = window_partition(x_norm, self.window_size)
         x_partitioned = tf.reshape(x_partitioned, [-1, self.window_size*self.window_size, C])
@@ -153,8 +162,6 @@ class SwinTransformerBlock(layers.Layer):
         x_attn = window_unpartition(x_attn, self.window_size, H, W)
         
         x = x + self.drop_path(x_attn, training=training)
-        
-        # MLP
         x = x + self.drop_path(self.mlp(self.norm2(x), training=training), training=training)
         
         return x
@@ -170,26 +177,14 @@ class PatchMerging(layers.Layer):
         self.norm = layers.LayerNormalization(epsilon=1e-5)
     
     def call(self, x):
-        """
-        x: (B, H, W, C)
-        """
-        B = tf.shape(x)[0]
-        H = tf.shape(x)[1]
-        W = tf.shape(x)[2]
-        C = tf.shape(x)[3]
+        x0 = x[:, 0::2, 0::2, :]
+        x1 = x[:, 1::2, 0::2, :]
+        x2 = x[:, 0::2, 1::2, :]
+        x3 = x[:, 1::2, 1::2, :]
         
-        # Downsample by factor of 2 by taking every other pixel in 4 groups
-        x0 = x[:, 0::2, 0::2, :]  # (B, H/2, W/2, C)
-        x1 = x[:, 1::2, 0::2, :]  # (B, H/2, W/2, C)
-        x2 = x[:, 0::2, 1::2, :]  # (B, H/2, W/2, C)
-        x3 = x[:, 1::2, 1::2, :]  # (B, H/2, W/2, C)
-        
-        # Concatenate along channel dimension
-        x = tf.concat([x0, x1, x2, x3], axis=-1)  # (B, H/2, W/2, 4*C)
-        
-        # Apply normalization and linear projection
+        x = tf.concat([x0, x1, x2, x3], axis=-1)
         x = self.norm(x)
-        x = self.reduction(x)  # (B, H/2, W/2, 2*C)
+        x = self.reduction(x)
         
         return x
 
@@ -207,26 +202,15 @@ class PatchEmbedding(layers.Layer):
         self.norm = layers.LayerNormalization(epsilon=1e-5)
     
     def call(self, x):
-        x = self.proj(x)  # B, H', W', embed_dim
+        x = self.proj(x)
         x = self.norm(x)
         return x
 
 
 def build_swin_tiny(input_shape, num_classes=2, pretrained=False):
-    """
-    Build Swin-Tiny for deepfake detection
-    
-    Args:
-        input_shape: Tuple (height, width, channels)
-        num_classes: Number of output classes
-        pretrained: Whether to load ImageNet pretrained weights (placeholder)
-    
-    Returns:
-        Keras Model
-    """
+    """Build Swin-Tiny for deepfake detection"""
     print("✓ Building Swin-Tiny Transformer")
     
-    # Swin-Tiny config
     patch_size = 4
     embed_dim = 96
     depths = [2, 2, 6, 2]
@@ -234,12 +218,8 @@ def build_swin_tiny(input_shape, num_classes=2, pretrained=False):
     window_size = 7
     
     inputs = keras.Input(shape=input_shape)
-    
-    # Patch embedding - keeps spatial dimensions
     x = PatchEmbedding(patch_size=patch_size, embed_dim=embed_dim)(inputs)
-    # x shape: (B, H', W', embed_dim)
     
-    # Swin layers - process with spatial dimensions maintained
     current_dim = embed_dim
     for stage_idx, (depth, num_head) in enumerate(zip(depths, num_heads)):
         for block_idx in range(depth):
@@ -255,15 +235,12 @@ def build_swin_tiny(input_shape, num_classes=2, pretrained=False):
             )(x)
         
         if stage_idx < len(depths) - 1:
-            # Patch merging - reduce spatial size, increase channels
             x = PatchMerging(dim=current_dim, name=f"patch_merge_{stage_idx}")(x)
             current_dim = current_dim * 2
     
-    # Classification head
     x = layers.LayerNormalization(epsilon=1e-5)(x)
     x = layers.GlobalAveragePooling2D()(x)
-    x = layers.Dense(num_classes, activation='softmax')(x)
+    outputs = layers.Dense(num_classes, activation='softmax')(x)
     
-    model = keras.Model(inputs=inputs, outputs=x, name='SwinTiny')
-    
+    model = keras.Model(inputs=inputs, outputs=outputs, name='SwinTiny')
     return model
