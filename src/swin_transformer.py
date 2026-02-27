@@ -58,11 +58,17 @@ class WindowAttention(layers.Layer):
         coords = tf.stack(tf.meshgrid(coords_h, coords_w, indexing='ij'))  # 2, ws, ws
         coords_flatten = tf.reshape(tf.transpose(coords, [1, 2, 0]), [-1, 2])  # ws*ws, 2
         relative_coords = coords_flatten[:, None, :] - coords_flatten[None, :, :]  # ws*ws, ws*ws, 2
-        relative_coords = tf.experimental.numpy.asarray(relative_coords)
-        relative_coords[:, :, 0] += window_size - 1
-        relative_coords[:, :, 1] += window_size - 1
-        relative_coords[:, :, 0] *= 2 * window_size - 1
-        relative_position_index = tf.reduce_sum(relative_coords, axis=-1)  # ws*ws, ws*ws
+        relative_coords = tf.cast(relative_coords, tf.float32)
+        
+        # Use tensor operations instead of item assignment
+        h_offset = tf.constant([window_size - 1, 0], dtype=tf.float32)
+        relative_coords = relative_coords + tf.reshape(h_offset, [1, 1, 2])
+        
+        # Compute linear index
+        relative_coords_0 = tf.cast(relative_coords[:, :, 0], tf.int32)
+        relative_coords_1 = tf.cast(relative_coords[:, :, 1], tf.int32)
+        relative_position_index = relative_coords_0 * (2 * window_size - 1) + relative_coords_1
+        
         self.relative_position_index = tf.Variable(
             relative_position_index, trainable=False, name='relative_position_index'
         )
