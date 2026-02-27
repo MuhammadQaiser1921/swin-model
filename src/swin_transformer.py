@@ -69,9 +69,8 @@ class WindowAttention(layers.Layer):
         relative_coords_1 = tf.cast(relative_coords[:, :, 1], tf.int32)
         relative_position_index = relative_coords_0 * (2 * window_size - 1) + relative_coords_1
         
-        self.relative_position_index = tf.Variable(
-            relative_position_index, trainable=False, name='relative_position_index'
-        )
+        # Store as numpy constant (will be on correct device when used)
+        self.relative_position_index = relative_position_index.numpy()
         
         self.qkv = layers.Dense(dim * 3, use_bias=True)
         self.attn_drop = layers.Dropout(attn_drop)
@@ -94,7 +93,7 @@ class WindowAttention(layers.Layer):
         # Add relative position bias
         relative_position_bias = tf.gather(
             self.relative_position_bias_table,
-            tf.reshape(self.relative_position_index, [-1])
+            tf.reshape(tf.constant(self.relative_position_index, dtype=tf.int32), [-1])
         )
         relative_position_bias = tf.reshape(
             relative_position_bias,
