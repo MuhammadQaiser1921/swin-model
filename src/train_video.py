@@ -6,7 +6,7 @@ from tensorflow import keras
 from tensorflow.keras import layers
 from datetime import datetime
 import matplotlib.pyplot as plt
-from swin_transformer import build_model # Assumes your model code is in swin_transformer.py
+from swin_transformer import build_swin_tiny # Assumes your model code is in swin_transformer.py
 
 # Consolidated Config inside the script for easier access
 class Config:
@@ -65,7 +65,7 @@ def run_training_session(data, epochs=Config.epochs, batch_size=Config.batch_siz
     val_ds = tf.data.Dataset.from_tensor_slices((data['val_paths'], data['val_labels'])).map(_decode).batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
     # Build and compile model
-    model = build_model(input_shape=(224, 224, 3), num_classes=2)
+    model = build_swin_tiny(input_shape=(224, 224, 3), num_classes=2)
     model.compile(optimizer=tf.keras.optimizers.AdamW(learning_rate=lr),
                   loss='sparse_categorical_crossentropy', metrics=['accuracy', tf.keras.metrics.AUC(name='auc')])
     
