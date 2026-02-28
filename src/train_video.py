@@ -126,20 +126,7 @@ def run_training_session(
         .prefetch(tf.data.AUTOTUNE)
     )
 
-    # ==============================
-    # BUILD MODEL ON GPU (CRITICAL FIX)
-    # ==============================
-    if physical_devices:
-        with tf.device('/GPU:0'):
-            model = build_swin_tiny(
-                input_shape=(224, 224, 3),
-                num_classes=2
-            )
-    else:
-        model = build_swin_tiny(
-            input_shape=(224, 224, 3),
-            num_classes=2
-        )
+    
 
     # -------- Compile --------
     model.compile(
