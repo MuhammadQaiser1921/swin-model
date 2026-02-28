@@ -140,8 +140,7 @@ def run_training_session(
         optimizer=tf.keras.optimizers.AdamW(learning_rate=lr),
         loss='sparse_categorical_crossentropy',
         metrics=[
-            'accuracy',
-            tf.keras.metrics.AUC(name='auc')
+            'accuracy'
         ]
     )
 
