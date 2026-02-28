@@ -226,4 +226,4 @@ def build_swin_tiny(input_shape, num_classes=2):
     x = layers.GlobalAveragePooling2D()(x)
     outputs = layers.Dense(num_classes, activation='softmax')(x)
     
-    return keras.Model(inputs=inputs, outputs=outputs, name='SwinTiny')
+    return keras.Model(inputs=inputs, outputs=outputs, name='Swin-Tiny')
