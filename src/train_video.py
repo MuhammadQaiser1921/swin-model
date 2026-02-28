@@ -5,16 +5,6 @@ from tensorflow import keras
 from datetime import datetime
 from swin_transformer import build_swin_tiny
 
-# =========================
-# GPU STABILITY FIX (CRITICAL)
-# =========================
-physical_devices = tf.config.list_physical_devices('GPU')
-if physical_devices:
-    print("✅ GPU detected")
-    for gpu in physical_devices:
-        tf.config.experimental.set_memory_growth(gpu, True)
-else:
-    print("⚠️ Running on CPU")
 
 # =========================
 # CONFIG
