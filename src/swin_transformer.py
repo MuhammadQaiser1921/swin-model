@@ -64,7 +64,7 @@ class WindowAttention(layers.Layer):
         relative_coords[:, :, 0] *= 2 * window_size - 1
         relative_position_index = relative_coords.sum(-1).astype(np.int32)
         
-        # FIX: Register index as a non-trainable weight to ensure proper GPU placement
+        # Initialize as a non-trainable weight
         self.relative_position_index = self.add_weight(
             name='relative_position_index',
             shape=relative_position_index.shape,
@@ -90,10 +90,13 @@ class WindowAttention(layers.Layer):
         q, k, v = qkv[0], qkv[1], qkv[2]
         attn = (q @ tf.transpose(k, [0, 1, 3, 2])) * self.scale
         
-        # Gather bias: Indexing is now on the same device as the bias table
+        # FIX: Explicitly cast/ensure the index is seen as a tensor during the call
+        # This forces TensorFlow to move the resource to the GPU during graph execution
+        rel_pos_index = tf.cast(self.relative_position_index, dtype=tf.int32)
+        
         relative_position_bias = tf.gather(
             self.relative_position_bias_table,
-            tf.reshape(self.relative_position_index, [-1])
+            tf.reshape(rel_pos_index, [-1])
         )
         relative_position_bias = tf.reshape(
             relative_position_bias,
@@ -195,10 +198,7 @@ class PatchEmbedding(layers.Layer):
 
 
 def build_swin_tiny(input_shape, num_classes=2):
-    """
-    Constructs the Swin-Tiny architecture.
-    Works for both Video (224, 224, 3) and Audio (128, 128, 1) inputs.
-    """
+    """Constructs the Swin-Tiny architecture."""
     print(f"✓ Building Swin-Tiny Transformer for shape: {input_shape}")
     
     embed_dim = 96
@@ -208,7 +208,6 @@ def build_swin_tiny(input_shape, num_classes=2):
     
     inputs = keras.Input(shape=input_shape)
     
-    # Optional: If audio input is 1D/single-channel, expand it to 3 for standard processing
     x = inputs
     if input_shape[-1] == 1:
         x = layers.Conv2D(3, kernel_size=1)(x)
@@ -235,4 +234,4 @@ def build_swin_tiny(input_shape, num_classes=2):
     x = layers.GlobalAveragePooling2D()(x)
     outputs = layers.Dense(num_classes, activation='softmax')(x)
     
-    return keras.Model(inputs=inputs, outputs=outputs, name='SwinTiny')
+    return keras.Model(inputs=inputs, outputs=outputs, name='Swin-Tiny')
