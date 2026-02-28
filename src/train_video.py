@@ -1,229 +1,668 @@
 """
-Swin Transformer implementation for TensorFlow/Keras
-Designed to be compatible with both Video and Audio inputs.
+Deepfake frame dataset training script
+======================================
+
+Trains Swin-Tiny on pre-extracted frames from:
+- FaceForensics++ extracted frames (train/val/test with numeric class folders)
+- Deepfake_Dataset extracted frames (train/valid/test with class name folders)
+
+Usage Examples:
+---------------
+
+1. Complete training pipeline (one-shot):
+    ```python
+    model, history, auc_metrics = train_video_model()
+    ```
+
+2. Iterative development (load data once, rebuild model multiple times):
+    ```python
+    # Step 1: Load data once
+    data = load_data()
+    
+    # Step 2: Prepare datasets once
+    train_ds, val_ds, test_ds = prepare_datasets(data)
+    
+    # Step 3: Build/rebuild model as needed
+    model = build_and_compile_model()
+    
+    # Step 4: Train
+    history = train_model(model, train_ds, val_ds)
+    
+    # Step 5: Iterate - rebuild and retrain without reloading data
+    model = build_and_compile_model()  # Modify swin_transformer.py
+    history = train_model(model, train_ds, val_ds)
+    ```
 """
 
+import os
+import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
-import numpy as np
+from swin_transformer import build_swin_tiny
+from video_train_config import Config
+from data_loader import load_data, prepare_datasets
+import json
+from datetime import datetime
 
 
-def window_partition(x, window_size):
-    """Partition x into windows: (B, H, W, C) -> (num_windows*B, ws, ws, C)"""
-    B = tf.shape(x)[0]
-    H = tf.shape(x)[1]
-    W = tf.shape(x)[2]
-    C = tf.shape(x)[3]
-    ws = window_size
-    
-    x = tf.reshape(x, [B, H // ws, ws, W // ws, ws, C])
-    x = tf.transpose(x, [0, 1, 3, 2, 4, 5])
-    x = tf.reshape(x, [-1, ws, ws, C])
-    return x
+# ========== HELPER FUNCTIONS ==========
 
 
-def window_unpartition(windows, window_size, H, W):
-    """Reverse partition: (num_windows*B, ws, ws, C) -> (B, H, W, C)"""
-    B = tf.shape(windows)[0] // (H // window_size) // (W // window_size)
-    ws = window_size
-    
-    x = tf.reshape(windows, [B, H // ws, W // ws, ws, ws, -1])
-    x = tf.transpose(x, [0, 1, 3, 2, 4, 5])
-    x = tf.reshape(x, [B, H, W, -1])
-    return x
+
+def load_extracted_frame_paths():
+    """
+    Load extracted frame paths from two datasets with separate split conventions.
+
+    Returns:
+        dict with train/val/test paths and labels.
+    """
+    datasets = [
+        {
+            'root': Config.FFPP_FRAMES_ROOT,
+            'splits': Config.FFPP_SPLITS,
+            'labels': Config.FFPP_LABELS,
+            'name': 'FaceForensics++',
+        },
+        {
+            'root': Config.DEEPFAKE_FRAMES_ROOT,
+            'splits': Config.DEEPFAKE_SPLITS,
+            'labels': Config.DEEPFAKE_LABELS,
+            'name': 'Deepfake_Dataset',
+        },
+    ]
+
+    output = {
+        'train_paths': [],
+        'train_labels': [],
+        'val_paths': [],
+        'val_labels': [],
+        'test_paths': [],
+        'test_labels': [],
+    }
+
+    for dataset in datasets:
+        root = dataset['root']
+        splits = dataset['splits']
+        labels = dataset['labels']
+        name = dataset['name']
+
+        print(f"\n📁 Loading extracted frames: {name}")
+        print(f"   Root: {root}")
+
+        for split_key, split_folder in splits.items():
+            split_root = os.path.join(root, split_folder)
+            paths, lbls = _collect_image_paths(
+                split_root,
+                labels,
+                Config.IMAGE_EXTS,
+                max_per_class=Config.MAX_IMAGES_PER_CLASS,
+            )
+
+            output[f"{split_key}_paths"].extend(paths)
+            output[f"{split_key}_labels"].extend(lbls)
+
+            print(
+                f"   {split_key}: {len(paths)} images from {split_root}"
+            )
+
+    return output
 
 
-class WindowAttention(layers.Layer):
-    """Multi-head self-attention with relative position bias"""
-    
-    def __init__(self, dim, window_size, num_heads=8, attn_drop=0., proj_drop=0., **kwargs):
-        super().__init__(**kwargs)
-        self.dim = dim
-        self.window_size = window_size
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-        self.scale = self.head_dim ** -0.5
-        
-        # Learnable relative position bias
-        self.relative_position_bias_table = self.add_weight(
-            name='relative_position_bias_table',
-            shape=((2 * window_size - 1) * (2 * window_size - 1), num_heads),
-            initializer=keras.initializers.TruncatedNormal(stddev=0.02),
-            trainable=True
+def _decode_image(path, label):
+    image = tf.io.read_file(path)
+    image = tf.image.decode_image(image, channels=3, expand_animations=False)
+    image = tf.image.resize(image, (Config.IMG_SIZE, Config.IMG_SIZE))
+    image = tf.cast(image, tf.float32) / 255.0
+    return image, label
+
+
+def build_image_dataset(paths, labels, batch_size, shuffle=False, augment=False):
+    if len(paths) == 0:
+        return None
+
+    dataset = tf.data.Dataset.from_tensor_slices((paths, labels))
+    if shuffle:
+        dataset = dataset.shuffle(buffer_size=min(len(paths), 20000))
+
+    dataset = dataset.map(_decode_image, num_parallel_calls=tf.data.AUTOTUNE)
+
+    if augment and Config.AUGMENTATION:
+        augmentation = create_augmentation_layer()
+        dataset = dataset.map(
+            lambda x, y: (augmentation(x, training=True), y),
+            num_parallel_calls=tf.data.AUTOTUNE,
         )
-        
-        # Precompute relative position index using numpy
-        coords_h = np.arange(window_size)
-        coords_w = np.arange(window_size)
-        coords = np.stack(np.meshgrid(coords_h, coords_w, indexing='ij')) 
-        coords_flatten = coords.transpose(1, 2, 0).reshape(-1, 2)
-        relative_coords = coords_flatten[:, None, :] - coords_flatten[None, :, :]
-        relative_coords[:, :, 0] += window_size - 1
-        relative_coords[:, :, 1] += window_size - 1
-        relative_coords[:, :, 0] *= 2 * window_size - 1
-        relative_position_index = relative_coords.sum(-1).astype(np.int32)
-        
-        # Store as a constant tensor to be used in the call method
-        self.relative_position_index = tf.constant(relative_position_index, dtype=tf.int32)
 
-        self.qkv = layers.Dense(dim * 3, use_bias=True)
-        self.attn_drop = layers.Dropout(attn_drop)
-        self.proj = layers.Dense(dim)
-        self.proj_drop = layers.Dropout(proj_drop)
+    return dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
+
+# ========== DATA AUGMENTATION ==========
+
+def create_augmentation_layer():
+    """
+    Create data augmentation pipeline for training.
+    """
+    return keras.Sequential([
+        layers.RandomFlip("horizontal"),
+        layers.RandomRotation(0.05),  # ±5% rotation
+        layers.RandomZoom(0.1),  # ±10% zoom
+        layers.RandomContrast(0.1),  # Contrast adjustment
+        layers.RandomBrightness(0.1),  # Brightness adjustment
+    ], name="data_augmentation")
+
+
+def compute_auc_metrics(y_true, y_pred_probs):
+    """
+    Compute AUC and other threshold-independent metrics.
     
-    def call(self, x, mask=None, training=False):
-        B_ = tf.shape(x)[0]
-        N = tf.shape(x)[1]
-        C = tf.shape(x)[2]
-        
-        qkv = self.qkv(x)
-        qkv = tf.reshape(qkv, [B_, N, 3, self.num_heads, self.head_dim])
-        qkv = tf.transpose(qkv, [2, 0, 3, 1, 4]) 
-        
-        q, k, v = qkv[0], qkv[1], qkv[2]
-        attn = (q @ tf.transpose(k, [0, 1, 3, 2])) * self.scale
-        
-        # FIXED: Use the precomputed constant index. 
-        # Being a constant in the graph ensures it is placed on the active device (GPU).
-        relative_position_bias = tf.gather(
-            self.relative_position_bias_table,
-            tf.reshape(self.relative_position_index, [-1])
+    Args:
+        y_true: True labels (0 or 1)
+        y_pred_probs: Predicted probabilities for class 1 (shape: N,)
+    
+    Returns:
+        Dictionary with AUC, ROC curve, threshold metrics
+    """
+    from sklearn.metrics import roc_curve, auc, roc_auc_score, confusion_matrix, precision_recall_curve
+    
+    # Compute AUC-ROC
+    auc_score = roc_auc_score(y_true, y_pred_probs)
+    
+    # Compute ROC curve
+    fpr, tpr, thresholds = roc_curve(y_true, y_pred_probs)
+    roc_auc = auc(fpr, tpr)
+    
+    # Find optimal threshold (Youden's index)
+    optimal_idx = np.argmax(tpr - fpr)
+    optimal_threshold = thresholds[optimal_idx]
+    
+    # Compute at optimal threshold
+    y_pred_optimal = (y_pred_probs >= optimal_threshold).astype(int)
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred_optimal).ravel()
+    
+    # Precision-Recall AUC
+    precision, recall, _ = precision_recall_curve(y_true, y_pred_probs)
+    pr_auc = auc(recall, precision)
+    
+    return {
+        'auc_roc': auc_score,
+        'pr_auc': pr_auc,
+        'fpr': fpr,
+        'tpr': tpr,
+        'thresholds': thresholds,
+        'optimal_threshold': optimal_threshold,
+        'optimal_sensitivity': tp / (tp + fn) if (tp + fn) > 0 else 0,  # Recall/TPR
+        'optimal_specificity': tn / (tn + fp) if (tn + fp) > 0 else 0,  # TNR
+        'optimal_precision': tp / (tp + fp) if (tp + fp) > 0 else 0,
+        'optimal_f1': 2 * (tp / (tp + fp) * tp / (tp + fn)) / (tp / (tp + fp) + tp / (tp + fn)) if (tp + fp) > 0 and (tp + fn) > 0 else 0
+    }
+
+
+def plot_auc_curve(metrics, output_path):
+    """
+    Plot AUC-ROC and Precision-Recall curves.
+    
+    Args:
+        metrics: Dictionary with AUC metrics
+        output_path: Path to save the plot
+    """
+    import matplotlib.pyplot as plt
+    
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # ROC Curve
+    axes[0].plot(metrics['fpr'], metrics['tpr'], 'b-', linewidth=2, 
+                 label=f"AUC = {metrics['auc_roc']:.4f}")
+    axes[0].plot([0, 1], [0, 1], 'r--', linewidth=1, label='Random')
+    axes[0].scatter(1 - metrics['optimal_specificity'], metrics['optimal_sensitivity'], 
+                   color='red', s=100, marker='*', label='Optimal Threshold', zorder=5)
+    axes[0].set_xlabel('False Positive Rate', fontsize=12)
+    axes[0].set_ylabel('True Positive Rate', fontsize=12)
+    axes[0].set_title('ROC Curve', fontsize=14, fontweight='bold')
+    axes[0].legend(loc='lower right', fontsize=10)
+    axes[0].grid(alpha=0.3)
+    
+    # PR Curve
+    from sklearn.metrics import precision_recall_curve
+    # Already computed in metrics, we'll plot using stored values
+    axes[1].text(0.5, 0.5, f"PR-AUC = {metrics['pr_auc']:.4f}\n\nOptimal Threshold = {metrics['optimal_threshold']:.4f}\n\nSensitivity = {metrics['optimal_sensitivity']:.4f}\nSpecificity = {metrics['optimal_specificity']:.4f}\nPrecision = {metrics['optimal_precision']:.4f}\nF1 = {metrics['optimal_f1']:.4f}", 
+                ha='center', va='center', fontsize=12, transform=axes[1].transAxes,
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    axes[1].set_title('Performance Metrics', fontsize=14, fontweight='bold')
+    axes[1].axis('off')
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"✓ AUC curves saved to: {output_path}")
+
+
+# ========== WEIGHT SAVING ==========
+
+def save_model_weights(model, model_name="swin_tiny_video"):
+    """
+    Save model weights, full model, and configuration.
+    
+    Args:
+        model: Trained Keras model
+        model_name: Base name for model files
+    
+    Returns:
+        Dictionary with save paths
+    """
+    os.makedirs(Config.WEIGHTS_DIR, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    save_paths = {}
+    
+    # Save weights only (.h5)
+    weights_path = os.path.join(Config.WEIGHTS_DIR, f"{model_name}_weights_{timestamp}.h5")
+    model.save_weights(weights_path)
+    save_paths['weights_h5'] = weights_path
+    print(f"✓ Weights saved (H5): {weights_path}")
+    
+    # Save weights as SavedModel format (TensorFlow)
+    saved_model_path = os.path.join(Config.WEIGHTS_DIR, f"{model_name}_savedmodel_{timestamp}")
+    model.save(saved_model_path, save_format='tf')
+    save_paths['saved_model'] = saved_model_path
+    print(f"✓ Model saved (SavedModel): {saved_model_path}")
+    
+    # Save model configuration
+    config_path = os.path.join(Config.WEIGHTS_DIR, f"{model_name}_config_{timestamp}.json")
+    config = model.get_config()
+    with open(config_path, 'w') as f:
+        json.dump(config, f, indent=2)
+    save_paths['config'] = config_path
+    print(f"✓ Model config saved: {config_path}")
+    
+    # Save model summary
+    summary_path = os.path.join(Config.WEIGHTS_DIR, f"{model_name}_summary_{timestamp}.txt")
+    with open(summary_path, 'w') as f:
+        model.summary(print_fn=lambda x: f.write(x + '\n'))
+    save_paths['summary'] = summary_path
+    print(f"✓ Model summary saved: {summary_path}")
+    
+    return save_paths
+
+
+def create_callbacks(model_name="swin_tiny_video"):
+    """
+    Create training callbacks for monitoring and checkpointing.
+    """
+    # Create directories
+    os.makedirs(Config.CHECKPOINT_DIR, exist_ok=True)
+    os.makedirs(Config.LOG_DIR, exist_ok=True)
+    os.makedirs(Config.WEIGHTS_DIR, exist_ok=True)
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    callbacks = []
+    
+    # ModelCheckpoint - save best model
+    checkpoint_path = os.path.join(
+        Config.CHECKPOINT_DIR, 
+        f"{model_name}_best_{timestamp}.h5"
+    )
+    callbacks.append(
+        keras.callbacks.ModelCheckpoint(
+            checkpoint_path,
+            monitor='val_auc',  # Monitor AUC instead of accuracy
+            save_best_only=True,
+            save_weights_only=False,
+            mode='max',
+            verbose=1
         )
-        relative_position_bias = tf.reshape(
-            relative_position_bias,
-            [N, N, self.num_heads]
+    )
+    
+    # EarlyStopping - stop if no improvement
+    callbacks.append(
+        keras.callbacks.EarlyStopping(
+            monitor='val_auc',  # Monitor AUC
+            patience=10,
+            restore_best_weights=True,
+            verbose=1,
+            mode='max'
         )
-        relative_position_bias = tf.transpose(relative_position_bias, [2, 0, 1])
-        attn = attn + tf.expand_dims(relative_position_bias, 0)
-        
-        if mask is not None:
-            attn = attn + mask
-        
-        attn = tf.nn.softmax(attn, axis=-1)
-        attn = self.attn_drop(attn, training=training)
-        
-        x = tf.reshape(tf.transpose(attn @ v, [0, 2, 1, 3]), [B_, N, C])
-        x = self.proj_drop(self.proj(x), training=training)
-        return x
-
-
-class SwinTransformerBlock(layers.Layer):
-    """Swin Transformer Block with dynamic resolution handling"""
+    )
     
-    def __init__(self, dim, num_heads, window_size=7, mlp_ratio=4., 
-                 drop=0., attn_drop=0., drop_path=0., **kwargs):
-        super().__init__(**kwargs)
-        self.dim = dim
-        self.num_heads = num_heads
-        self.window_size = window_size
-        self.mlp_ratio = mlp_ratio
-        
-        self.norm1 = layers.LayerNormalization(epsilon=1e-5)
-        self.attn = WindowAttention(
-            dim, window_size=window_size, num_heads=num_heads, attn_drop=attn_drop, proj_drop=drop
+    # ReduceLROnPlateau - reduce learning rate when plateaued
+    callbacks.append(
+        keras.callbacks.ReduceLROnPlateau(
+            monitor='val_loss',
+            factor=0.5,
+            patience=5,
+            min_lr=1e-7,
+            verbose=1
         )
-        
-        self.norm2 = layers.LayerNormalization(epsilon=1e-5)
-        self.mlp = keras.Sequential([
-            layers.Dense(int(dim * mlp_ratio), activation='gelu'),
-            layers.Dropout(drop),
-            layers.Dense(dim),
-            layers.Dropout(drop)
-        ])
-        
-        self.drop_path = layers.Dropout(drop_path) if drop_path > 0. else layers.Identity()
+    )
     
-    def call(self, x, training=False):
-        H, W = tf.shape(x)[1], tf.shape(x)[2]
-        C = tf.shape(x)[3]
-        
-        x_norm = self.norm1(x)
-        x_partitioned = window_partition(x_norm, self.window_size)
-        x_partitioned = tf.reshape(x_partitioned, [-1, self.window_size*self.window_size, C])
-        
-        x_attn = self.attn(x_partitioned, training=training)
-        x_attn = tf.reshape(x_attn, [-1, self.window_size, self.window_size, C])
-        x_attn = window_unpartition(x_attn, self.window_size, H, W)
-        
-        x = x + self.drop_path(x_attn, training=training)
-        x = x + self.drop_path(self.mlp(self.norm2(x), training=training), training=training)
-        return x
-
-
-class PatchMerging(layers.Layer):
-    """Dynamic resolution reduction and channel expansion layer"""
-    
-    def __init__(self, dim, **kwargs):
-        super().__init__(**kwargs)
-        self.dim = dim
-        self.reduction = layers.Dense(2 * dim, use_bias=False)
-        self.norm = layers.LayerNormalization(epsilon=1e-5)
-    
-    def call(self, x):
-        x0 = x[:, 0::2, 0::2, :]
-        x1 = x[:, 1::2, 0::2, :]
-        x2 = x[:, 0::2, 1::2, :]
-        x3 = x[:, 1::2, 1::2, :]
-        
-        x = tf.concat([x0, x1, x2, x3], axis=-1)
-        x = self.norm(x)
-        return self.reduction(x)
-
-
-class PatchEmbedding(layers.Layer):
-    """Initial patch embedding layer"""
-    
-    def __init__(self, patch_size=4, embed_dim=96, **kwargs):
-        super().__init__(**kwargs)
-        self.patch_size = patch_size
-        self.embed_dim = embed_dim
-        self.proj = layers.Conv2D(
-            embed_dim, kernel_size=patch_size, strides=patch_size, padding='valid'
+    # TensorBoard - visualize training
+    log_path = os.path.join(Config.LOG_DIR, f"{model_name}_{timestamp}")
+    callbacks.append(
+        keras.callbacks.TensorBoard(
+            log_dir=log_path,
+            histogram_freq=1,
+            write_graph=True
         )
-        self.norm = layers.LayerNormalization(epsilon=1e-5)
+    )
     
-    def call(self, x):
-        x = self.proj(x)
-        x = self.norm(x)
-        return x
+    # CSVLogger - log metrics to CSV
+    csv_path = os.path.join(Config.LOG_DIR, f"{model_name}_{timestamp}.csv")
+    callbacks.append(
+        keras.callbacks.CSVLogger(csv_path, separator=',', append=False)
+    )
+    
+    return callbacks
 
 
-def build_swin_tiny(input_shape, num_classes=2):
-    """Constructs the Swin-Tiny architecture."""
-    print(f"✓ Building Swin-Tiny Transformer for shape: {input_shape}")
-    
-    embed_dim = 96
-    depths = [2, 2, 6, 2]
-    num_heads = [3, 6, 12, 24]
-    window_size = 7
-    
-    inputs = keras.Input(shape=input_shape)
-    
-    x = inputs
-    if input_shape[-1] == 1:
-        x = layers.Conv2D(3, kernel_size=1)(x)
+# ========== MAIN TRAINING FUNCTION ==========
 
-    x = PatchEmbedding(patch_size=4, embed_dim=embed_dim)(x)
+def load_data():
+    """
+    Load and split data into train/val/test sets.
+    Call this once and reuse the returned data.
     
-    current_dim = embed_dim
-    for stage_idx, (depth, num_head) in enumerate(zip(depths, num_heads)):
-        for block_idx in range(depth):
-            x = SwinTransformerBlock(
-                dim=current_dim,
-                num_heads=num_head,
-                window_size=window_size,
-                drop=0.1,
-                drop_path=0.1,
-                name=f"swin_block_s{stage_idx}_b{block_idx}"
-            )(x)
+    Returns:
+        dict: Contains train_paths, train_labels, val_paths, val_labels, test_paths, test_labels
+    """
+    print("\n📂 Loading data...")
+    
+    # Load extracted frame paths
+    paths = load_extracted_frame_paths()
+
+    train_paths = paths['train_paths']
+    train_labels = np.array(paths['train_labels'], dtype=np.int32)
+    val_paths = paths['val_paths']
+    val_labels = np.array(paths['val_labels'], dtype=np.int32)
+    test_paths = paths['test_paths']
+    test_labels = np.array(paths['test_labels'], dtype=np.int32)
+
+    if len(train_paths) == 0:
+        print("❌ Error: No training data found. Check dataset roots and split folders.")
+        return None
+
+    # If val split is missing, create it from train split
+    if len(val_paths) == 0:
+        train_paths, val_paths, train_labels, val_labels = train_test_split(
+            train_paths,
+            train_labels,
+            test_size=Config.VAL_SPLIT,
+            random_state=42,
+            stratify=train_labels,
+        )
+
+    print(f"\n📊 Data split:")
+    print(f"  Training samples: {len(train_paths)}")
+    print(f"  Validation samples: {len(val_paths)}")
+    print(f"  Test samples: {len(test_paths)}")
+    print(f"  Train fake/real: {np.sum(train_labels == 1)}/{np.sum(train_labels == 0)}")
+    print(f"  Val fake/real: {np.sum(val_labels == 1)}/{np.sum(val_labels == 0)}")
+    
+    return {
+        'train_paths': train_paths,
+        'train_labels': train_labels,
+        'val_paths': val_paths,
+        'val_labels': val_labels,
+        'test_paths': test_paths,
+        'test_labels': test_labels
+    }
+
+
+def prepare_datasets(data):
+    """
+    Create TensorFlow datasets from loaded data.
+    
+    Args:
+        data: Dict from load_data() containing paths and labels
+    
+    Returns:
+        tuple: (train_dataset, val_dataset, test_dataset)
+    """
+    print("\n🔄 Preparing TensorFlow datasets...")
+    
+    train_dataset = build_image_dataset(
+        data['train_paths'],
+        data['train_labels'],
+        batch_size=Config.BATCH_SIZE,
+        shuffle=True,
+        augment=True,
+    )
+    val_dataset = build_image_dataset(
+        data['val_paths'],
+        data['val_labels'],
+        batch_size=Config.BATCH_SIZE,
+        shuffle=False,
+        augment=False,
+    )
+    
+    test_dataset = None
+    if len(data['test_paths']) > 0:
+        test_dataset = build_image_dataset(
+            data['test_paths'],
+            data['test_labels'],
+            batch_size=Config.BATCH_SIZE,
+            shuffle=False,
+            augment=False,
+        )
+    
+    print("✓ Datasets prepared")
+    return train_dataset, val_dataset, test_dataset
+
+
+def build_and_compile_model():
+    """
+    Build and compile the Swin-Tiny model.
+    
+    Returns:
+        Compiled Keras model
+    """
+    print(f"\n🏗️ Building Swin-Tiny model...")
+    model = build_swin_tiny(
+        input_shape=Config.INPUT_SHAPE,
+        num_classes=Config.NUM_CLASSES
+    )
+    
+    # Print model summary
+    print("\n📐 Model Architecture:")
+    model.summary()
+    
+    # Count parameters
+    total_params = model.count_params()
+    print(f"\n  Total parameters: {total_params:,}")
+    
+    # Compile model
+    model.compile(
+        optimizer=keras.optimizers.AdamW(
+            learning_rate=Config.INITIAL_LR,
+            weight_decay=0.05  # Weight decay for regularization
+        ),
+        loss='sparse_categorical_crossentropy',
+        metrics=[
+            'accuracy',
+            keras.metrics.Precision(name='precision'),
+            keras.metrics.Recall(name='recall'),
+            keras.metrics.AUC(name='auc')
+        ]
+    )
+    
+    print(f"\n✓ Model compiled successfully!")
+    return model
+
+
+def train_model(model, train_dataset, val_dataset):
+    """
+    Train the model.
+    
+    Args:
+        model: Compiled Keras model
+        train_dataset: Training tf.data.Dataset
+        val_dataset: Validation tf.data.Dataset
+    
+    Returns:
+        History object from model.fit()
+    """
+    # Create callbacks
+    callbacks = create_callbacks()
+    
+    # Train model
+    print(f"\n🚀 Starting training...\n")
+    
+    history = model.fit(
+        train_dataset,
+        validation_data=val_dataset,
+        epochs=Config.EPOCHS,
+        callbacks=callbacks,
+        verbose=1
+    )
+    
+    return history
+
+
+def train_video_model():
+    """
+    Complete training pipeline - loads data, builds model, and trains.
+    For iterative development, use the separate functions instead:
+    1. data = load_data()  # Call once
+    2. train_ds, val_ds, test_ds = prepare_datasets(data)  # Call once
+    3. model = build_and_compile_model()  # Rebuild as needed
+    4. history = train_model(model, train_ds, val_ds)  # Train as needed
+    """
+    print("\n" + "="*60)
+    print("SWIN-TINY VIDEO MODEL TRAINING")
+    print("FaceForensics++ Dataset (C23 Compression)")
+    print("="*60)
+    
+    # Print configuration
+    print("\n📋 Configuration:")
+    print(f"  FF++ frames root: {Config.FFPP_FRAMES_ROOT}")
+    print(f"  Deepfake frames root: {Config.DEEPFAKE_FRAMES_ROOT}")
+    print(f"  Image size: {Config.IMG_SIZE}x{Config.IMG_SIZE}")
+    print(f"  Batch size: {Config.BATCH_SIZE}")
+    print(f"  Epochs: {Config.EPOCHS}")
+    print(f"  Learning rate: {Config.INITIAL_LR}")
+    print(f"  Validation split: {Config.VAL_SPLIT}")
+    print(f"  Data augmentation: {Config.AUGMENTATION}")
+    
+    # Load data
+    data = load_data()
+    if data is None:
+        return
+    
+    # Prepare datasets
+    train_dataset, val_dataset, test_dataset = prepare_datasets(data)
+    
+    # Build and compile model
+    model = build_and_compile_model()
+    
+    # Train model
+    history = train_model(model, train_dataset, val_dataset)
+    
+    # ===== EVALUATION & AUC COMPUTATION =====
+    print(f"\n📊 Computing AUC and other metrics on validation set...")
+    
+    # Get predictions on validation set
+    y_val_pred_probs = model.predict(val_dataset)
+    y_val_pred_probs = y_val_pred_probs[:, 1]  # Get probabilities for class 1 (fake)
+    
+    # Compute AUC metrics
+    auc_metrics = compute_auc_metrics(data['val_labels'], y_val_pred_probs)
+    
+    # Save final model
+    final_model_path = os.path.join(
+        Config.CHECKPOINT_DIR,
+        f"swin_tiny_video_final_{datetime.now().strftime('%Y%m%d_%H%M%S')}.h5"
+    )
+    model.save(final_model_path)
+    print(f"\n✓ Final model saved to: {final_model_path}")
+    
+    # Save model weights
+    if Config.SAVE_WEIGHTS:
+        weights_paths = save_model_weights(model)
+    
+    # Save training history
+    if Config.SAVE_HISTORY:
+        history_path = os.path.join(
+            Config.LOG_DIR,
+            f"training_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        )
+        with open(history_path, 'w') as f:
+            json.dump(history.history, f, indent=2)
+        print(f"✓ Training history saved to: {history_path}")
+    
+    # Save AUC metrics
+    auc_metrics_path = os.path.join(
+        Config.LOG_DIR,
+        f"auc_metrics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    )
+    metrics_to_save = {k: v for k, v in auc_metrics.items() if k not in ['fpr', 'tpr', 'thresholds']}
+    metrics_to_save['fpr'] = [float(x) for x in auc_metrics['fpr']]
+    metrics_to_save['tpr'] = [float(x) for x in auc_metrics['tpr']]
+    metrics_to_save['thresholds'] = [float(x) for x in auc_metrics['thresholds']]
+    
+    with open(auc_metrics_path, 'w') as f:
+        json.dump(metrics_to_save, f, indent=2)
+    print(f"✓ AUC metrics saved to: {auc_metrics_path}")
+    
+    # Plot AUC curves
+    auc_plot_path = os.path.join(
+        Config.LOG_DIR,
+        f"auc_curves_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    )
+    plot_auc_curve(auc_metrics, auc_plot_path)
+    
+    # Print final metrics
+    print("\n" + "="*60)
+    print("TRAINING COMPLETED - FINAL METRICS")
+    print("="*60)
+    print(f"Final training accuracy: {history.history['accuracy'][-1]:.4f}")
+    print(f"Final validation accuracy: {history.history['val_accuracy'][-1]:.4f}")
+    print(f"Best validation accuracy: {max(history.history['val_accuracy']):.4f}")
+    print("\n" + "="*60)
+    print("AUC METRICS (on Validation Set)")
+    print("="*60)
+    print(f"AUC-ROC: {auc_metrics['auc_roc']:.4f}")
+    print(f"PR-AUC: {auc_metrics['pr_auc']:.4f}")
+    print(f"\nOptimal Threshold: {auc_metrics['optimal_threshold']:.4f}")
+    print(f"  Sensitivity (TPR): {auc_metrics['optimal_sensitivity']:.4f}")
+    print(f"  Specificity (TNR): {auc_metrics['optimal_specificity']:.4f}")
+    print(f"  Precision: {auc_metrics['optimal_precision']:.4f}")
+    print(f"  F1-Score: {auc_metrics['optimal_f1']:.4f}")
+    print("="*60 + "\n")
+    
+    # Also compute test metrics if we have test data
+    if len(data['test_paths']) > 0:
+        print("📊 Computing AUC on test set...")
+        y_test_pred_probs = model.predict(test_dataset)
+        y_test_pred_probs = y_test_pred_probs[:, 1]
+        test_auc_metrics = compute_auc_metrics(data['test_labels'], y_test_pred_probs)
         
-        if stage_idx < len(depths) - 1:
-            x = PatchMerging(dim=current_dim, name=f"patch_merge_{stage_idx}")(x)
-            current_dim = current_dim * 2
+        print(f"\nTest Set AUC-ROC: {test_auc_metrics['auc_roc']:.4f}")
+        print(f"Test Set PR-AUC: {test_auc_metrics['pr_auc']:.4f}\n")
+    else:
+        print("📊 Test split not found. Skipping test metrics.")
     
-    x = layers.LayerNormalization(epsilon=1e-5)(x)
-    x = layers.GlobalAveragePooling2D()(x)
-    outputs = layers.Dense(num_classes, activation='softmax')(x)
+    return model, history, auc_metrics
+
+
+# ========== ENTRY POINT ==========
+
+if __name__ == "__main__":
+    # Set GPU memory growth (prevents TensorFlow from allocating all GPU memory)
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+            print(f"✓ Found {len(gpus)} GPU(s)")
+        except RuntimeError as e:
+            print(e)
     
-    return keras.Model(inputs=inputs, outputs=outputs, name='Swin-Tiny')
+    # Detect environment
+    if Config.KAGGLE_ENV:
+        print("\n🔍 Running on Kaggle")
+    else:
+        print("\n🔍 Running locally")
+    
+    # Run training
+    model, history, auc_metrics = train_video_model()
