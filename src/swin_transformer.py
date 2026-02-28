@@ -6,6 +6,7 @@ Designed to be compatible with both Video and Audio inputs.
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
+import numpy as np
 
 def window_partition(x, window_size):
     """Partition x into windows: (B, H, W, C) -> (num_windows*B, ws, ws, C)"""
@@ -32,7 +33,7 @@ def window_unpartition(windows, window_size, H, W):
 
 class WindowAttention(layers.Layer):
     """Multi-head self-attention with relative position bias"""
-    def __init__(self, dim, window_size, num_heads, **kwargs):
+    def __init__(self, dim, window_size, num_heads, attn_drop=0., proj_drop=0., **kwargs):
         super().__init__(**kwargs)
         self.num_heads = num_heads
         self.window_size = window_size
@@ -45,7 +46,7 @@ class WindowAttention(layers.Layer):
             trainable=True
         )
         
-        # Precompute relative position index using numpy
+        # Precompute relative position index
         coords_h = np.arange(window_size)
         coords_w = np.arange(window_size)
         coords = np.stack(np.meshgrid(coords_h, coords_w, indexing='ij')) 
@@ -56,7 +57,6 @@ class WindowAttention(layers.Layer):
         relative_coords[:, :, 0] *= 2 * window_size - 1
         relative_position_index = relative_coords.sum(-1).astype(np.int32)
         
-        # FIX: Register index as a non-trainable weight to ensure proper GPU placement
         self.relative_position_index = self.add_weight(
             name='relative_position_index',
             shape=relative_position_index.shape,
@@ -66,19 +66,21 @@ class WindowAttention(layers.Layer):
         )
 
         self.qkv = layers.Dense(dim * 3, use_bias=True)
+        self.attn_drop = layers.Dropout(attn_drop)
         self.proj = layers.Dense(dim)
+        self.proj_drop = layers.Dropout(proj_drop)
 
-    def call(self, x):
+    def call(self, x, mask=None, training=False):
         B_, N, C = tf.shape(x)[0], tf.shape(x)[1], tf.shape(x)[2]
         qkv = tf.transpose(tf.reshape(self.qkv(x), [B_, N, 3, self.num_heads, -1]), [2, 0, 3, 1, 4])
-        q, k, v = qkv[0] * self.scale, qkv[1], qkv[2]
+        q, k, v = qkv[0], qkv[1], qkv[2]
 
+        q = q * self.scale
         attn = (q @ tf.transpose(k, [0, 1, 3, 2]))
         
-        # Gather bias: Indexing is now on the same device as the bias table
         relative_position_bias = tf.gather(
             self.relative_position_bias_table,
-            tf.reshape(self.relative_position_index, [-1])
+            tf.reshape(tf.cast(self.relative_position_index, tf.int32), [-1])
         )
         relative_position_bias = tf.reshape(
             relative_position_bias,
@@ -98,16 +100,25 @@ class WindowAttention(layers.Layer):
         return x
 
 
-class SwinBlock(layers.Layer):
+class SwinTransformerBlock(layers.Layer):
     """Consolidated Swin Transformer Block"""
-    def __init__(self, dim, num_heads, window_size=7, **kwargs):
+    def __init__(self, dim, num_heads, window_size=7, mlp_ratio=4., 
+                 drop=0., attn_drop=0., drop_path=0., **kwargs):
         super().__init__(**kwargs)
+        self.dim = dim
+        self.num_heads = num_heads
+        self.window_size = window_size
+        
         self.norm1 = layers.LayerNormalization(epsilon=1e-5)
-        self.attn = WindowAttention(dim, window_size, num_heads)
+        self.attn = WindowAttention(
+            dim, window_size=window_size, num_heads=num_heads, 
+            attn_drop=attn_drop, proj_drop=drop
+        )
+        
         self.norm2 = layers.LayerNormalization(epsilon=1e-5)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = keras.Sequential([
-            layers.Dense(int(dim * mlp_ratio), activation='gelu'),
+            layers.Dense(mlp_hidden_dim, activation='gelu'),
             layers.Dropout(drop),
             layers.Dense(dim),
             layers.Dropout(drop)
@@ -134,7 +145,6 @@ class SwinBlock(layers.Layer):
 
 class PatchMerging(layers.Layer):
     """Dynamic resolution reduction and channel expansion layer"""
-    
     def __init__(self, dim, **kwargs):
         super().__init__(**kwargs)
         self.reduction = layers.Dense(2 * dim, use_bias=False)
@@ -153,7 +163,6 @@ class PatchMerging(layers.Layer):
 
 class PatchEmbedding(layers.Layer):
     """Initial patch embedding layer"""
-    
     def __init__(self, patch_size=4, embed_dim=96, **kwargs):
         super().__init__(**kwargs)
         self.patch_size = patch_size
@@ -170,10 +179,7 @@ class PatchEmbedding(layers.Layer):
 
 
 def build_swin_tiny(input_shape, num_classes=2):
-    """
-    Constructs the Swin-Tiny architecture.
-    Works for both Video (224, 224, 3) and Audio (128, 128, 1) inputs.
-    """
+    """Constructs the Swin-Tiny architecture."""
     print(f"✓ Building Swin-Tiny Transformer for shape: {input_shape}")
     
     embed_dim = 96
@@ -183,7 +189,6 @@ def build_swin_tiny(input_shape, num_classes=2):
     
     inputs = keras.Input(shape=input_shape)
     
-    # Optional: If audio input is 1D/single-channel, expand it to 3 for standard processing
     x = inputs
     if input_shape[-1] == 1:
         x = layers.Conv2D(3, kernel_size=1)(x)
@@ -197,7 +202,9 @@ def build_swin_tiny(input_shape, num_classes=2):
                 dim=current_dim,
                 num_heads=num_head,
                 window_size=window_size,
+                mlp_ratio=4.0,
                 drop=0.1,
+                attn_drop=0.0,
                 drop_path=0.1,
                 name=f"swin_block_s{stage_idx}_b{block_idx}"
             )(x)
