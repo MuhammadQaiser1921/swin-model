@@ -125,7 +125,7 @@ def run_training_session(
 	model.compile(
 		optimizer=tf.keras.optimizers.AdamW(learning_rate=lr),
 		loss='sparse_categorical_crossentropy',
-		metrics=['accuracy', tf.keras.metrics.AUC(name='auc')]
+		metrics=['accuracy']
 	)
 
 	timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -136,7 +136,7 @@ def run_training_session(
 				Config.CHECKPOINT_DIR,
 				f'audio_best_model_{timestamp}.h5'
 			),
-			monitor='val_auc',
+			monitor='val_accuracy',
 			save_best_only=True,
 			mode='max'
 		)
