@@ -133,4 +133,4 @@ def build_swin_tiny(input_shape, num_classes=2):
         if i < 3: x = PatchMerging(dim=dims[i])(x)
     
     x = layers.GlobalAveragePooling2D()(x)
-    return keras.Model(inputs=inputs, outputs=layers.Dense(num_classes, activation='softmax')(x))
+    return keras.Model(inputs=inputs, outputs=layers.Dense(num_classes, activation='sigmoid')(x))

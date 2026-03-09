@@ -1,4 +1,5 @@
 import os
+import numpy as np
 import tensorflow as tf
 from datetime import datetime
 from swin_transformer import build_swin_tiny
@@ -69,6 +70,47 @@ def load_and_prepare_data():
 	return output
 
 
+def _evaluate_binary_threshold(model, dataset, threshold=0.5):
+	# Collect true labels from dataset batches.
+	y_true_batches = []
+	for _, labels in dataset:
+		y_true_batches.append(tf.reshape(labels, [-1]))
+
+	if not y_true_batches:
+		return None
+
+	y_true = tf.concat(y_true_batches, axis=0).numpy().astype(np.int32)
+	y_prob = model.predict(dataset, verbose=0).reshape(-1)
+	y_pred = (y_prob >= threshold).astype(np.int32)
+
+	cm = tf.math.confusion_matrix(y_true, y_pred, num_classes=2).numpy()
+	tn, fp, fn, tp = cm.ravel()
+
+	precision = tp / (tp + fp + 1e-8)
+	recall = tp / (tp + fn + 1e-8)
+	f1 = 2.0 * precision * recall / (precision + recall + 1e-8)
+	accuracy = (tp + tn) / max(len(y_true), 1)
+
+	print(f'\n📌 Threshold metrics @ {threshold:.2f}')
+	print(f'Confusion Matrix [[TN, FP], [FN, TP]]:\n{cm}')
+	print(
+		f'Precision: {precision:.4f} | Recall: {recall:.4f} | '
+		f'F1: {f1:.4f} | Accuracy: {accuracy:.4f}'
+	)
+
+	return {
+		'threshold': float(threshold),
+		'tn': int(tn),
+		'fp': int(fp),
+		'fn': int(fn),
+		'tp': int(tp),
+		'precision': float(precision),
+		'recall': float(recall),
+		'f1': float(f1),
+		'threshold_accuracy': float(accuracy)
+	}
+
+
 # =========================
 # TRAINING FUNCTION
 # =========================
@@ -88,6 +130,7 @@ def run_training_session(
 		)
 		img = tf.image.resize(img, (224, 224))
 		img = tf.cast(img, tf.float32) / 255.0
+		label = tf.cast(label, tf.float32)
 		return img, label
 
 	train_ds = (
@@ -119,13 +162,13 @@ def run_training_session(
 
 	model = build_swin_tiny(
 		input_shape=(224, 224, 3),
-		num_classes=2
+		num_classes=1
 	)
 
 	model.compile(
 		optimizer=tf.keras.optimizers.AdamW(learning_rate=lr),
-		loss='sparse_categorical_crossentropy',
-		metrics=['accuracy']
+		loss='binary_crossentropy',
+		metrics=[tf.keras.metrics.BinaryAccuracy(name='accuracy')]
 	)
 
 	timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -156,5 +199,8 @@ def run_training_session(
 		print('🧪 Evaluating on test split...')
 		test_metrics = model.evaluate(test_ds, return_dict=True)
 		print(f'Test metrics: {test_metrics}')
+		threshold_metrics = _evaluate_binary_threshold(model, test_ds, threshold=0.5)
+		if threshold_metrics is not None:
+			test_metrics['threshold_metrics'] = threshold_metrics
 
 	return model, history, test_metrics

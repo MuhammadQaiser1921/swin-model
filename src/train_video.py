@@ -54,18 +54,20 @@ def load_and_prepare_data():
         'train_paths': [],
         'train_labels': [],
         'val_paths': [],
-        'val_labels': []
+        'val_labels': [],
+        'test_paths': [],
+        'test_labels': []
     }
 
     datasets = [
         {
             'root': Config.FFPP_FRAMES_ROOT,
-            'splits': {'train': 'train', 'val': 'val'},
+            'splits': {'train': 'train', 'val': 'val', 'test': 'test'},
             'labels': Config.FFPP_LABELS
         },
         {
             'root': Config.DEEPFAKE_FRAMES_ROOT,
-            'splits': {'train': 'train', 'val': 'valid'},
+            'splits': {'train': 'train', 'val': 'valid', 'test': 'test'},
             'labels': Config.DEEPFAKE_LABELS
         }
     ]
@@ -82,8 +84,50 @@ def load_and_prepare_data():
 
     print(f"Train samples: {len(output['train_paths'])}")
     print(f"Val samples: {len(output['val_paths'])}")
+    print(f"Test samples: {len(output['test_paths'])}")
 
     return output
+
+
+def _evaluate_binary_threshold(model, dataset, threshold=0.5):
+    # Collect true labels from dataset batches.
+    y_true_batches = []
+    for _, labels in dataset:
+        y_true_batches.append(tf.reshape(labels, [-1]))
+
+    if not y_true_batches:
+        return None
+
+    y_true = tf.concat(y_true_batches, axis=0).numpy().astype(np.int32)
+    y_prob = model.predict(dataset, verbose=0).reshape(-1)
+    y_pred = (y_prob >= threshold).astype(np.int32)
+
+    cm = tf.math.confusion_matrix(y_true, y_pred, num_classes=2).numpy()
+    tn, fp, fn, tp = cm.ravel()
+
+    precision = tp / (tp + fp + 1e-8)
+    recall = tp / (tp + fn + 1e-8)
+    f1 = 2.0 * precision * recall / (precision + recall + 1e-8)
+    accuracy = (tp + tn) / max(len(y_true), 1)
+
+    print(f"\n📌 Threshold metrics @ {threshold:.2f}")
+    print(f"Confusion Matrix [[TN, FP], [FN, TP]]:\n{cm}")
+    print(
+        f"Precision: {precision:.4f} | Recall: {recall:.4f} | "
+        f"F1: {f1:.4f} | Accuracy: {accuracy:.4f}"
+    )
+
+    return {
+        'threshold': float(threshold),
+        'tn': int(tn),
+        'fp': int(fp),
+        'fn': int(fn),
+        'tp': int(tp),
+        'precision': float(precision),
+        'recall': float(recall),
+        'f1': float(f1),
+        'threshold_accuracy': float(accuracy)
+    }
 
 
 # =========================
@@ -106,6 +150,7 @@ def run_training_session(
         )
         img = tf.image.resize(img, (224, 224))
         img = tf.cast(img, tf.float32) / 255.0
+        label = tf.cast(label, tf.float32)
         return img, label
 
     # -------- tf.data Pipeline --------
@@ -126,21 +171,31 @@ def run_training_session(
         .prefetch(tf.data.AUTOTUNE)
     )
 
+    test_ds = None
+    if data.get('test_paths'):
+        test_ds = (
+            tf.data.Dataset
+            .from_tensor_slices((data['test_paths'], data['test_labels']))
+            .map(_decode, num_parallel_calls=tf.data.AUTOTUNE)
+            .batch(batch_size)
+            .prefetch(tf.data.AUTOTUNE)
+        )
+
     # ==============================
     # BUILD MODEL ON GPU (CRITICAL FIX)
     # ==============================
     
     model = build_swin_tiny(
             input_shape=(224, 224, 3),
-            num_classes=2
+            num_classes=1
         )
 
     # -------- Compile --------
     model.compile(
         optimizer=tf.keras.optimizers.AdamW(learning_rate=lr),
-        loss='sparse_categorical_crossentropy',
+        loss='binary_crossentropy',
         metrics=[
-            'accuracy'
+            tf.keras.metrics.BinaryAccuracy(name='accuracy')
         ]
     )
 
@@ -152,7 +207,7 @@ def run_training_session(
                 Config.CHECKPOINT_DIR,
                 f"best_model_{timestamp}.h5"
             ),
-            monitor='val_auc',
+            monitor='val_accuracy',
             save_best_only=True,
             mode='max'
         )
@@ -167,4 +222,13 @@ def run_training_session(
         callbacks=callbacks
     )
 
-    return model, history
+    test_metrics = None
+    if test_ds is not None:
+        print('🧪 Evaluating on test split...')
+        test_metrics = model.evaluate(test_ds, return_dict=True)
+        print(f"Test metrics: {test_metrics}")
+        threshold_metrics = _evaluate_binary_threshold(model, test_ds, threshold=0.5)
+        if threshold_metrics is not None:
+            test_metrics['threshold_metrics'] = threshold_metrics
+
+    return model, history, test_metrics
