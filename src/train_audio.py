@@ -1,4 +1,5 @@
 import os
+import pickle
 import numpy as np
 import tensorflow as tf
 from datetime import datetime
@@ -111,6 +112,43 @@ def _evaluate_binary_threshold(model, dataset, threshold=0.5):
 	}
 
 
+def _save_model_as_pth(model, file_path):
+	payload = {
+		'model_config_json': model.to_json(),
+		'weights': model.get_weights()
+	}
+	with open(file_path, 'wb') as f:
+		pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+class BestPthCheckpoint(tf.keras.callbacks.Callback):
+	def __init__(self, checkpoint_dir, timestamp, monitor='val_accuracy', mode='max'):
+		super().__init__()
+		self.monitor = monitor
+		self.mode = mode
+		self.file_path = os.path.join(checkpoint_dir, f'audio_best_model_{timestamp}.pth')
+		self.best = -np.inf if mode == 'max' else np.inf
+
+	def _is_better(self, current):
+		if self.mode == 'max':
+			return current > self.best
+		return current < self.best
+
+	def on_epoch_end(self, epoch, logs=None):
+		logs = logs or {}
+		current = logs.get(self.monitor)
+		if current is None:
+			return
+
+		if self._is_better(current):
+			self.best = current
+			_save_model_as_pth(self.model, self.file_path)
+			print(
+				f'\n💾 Saved best .pth at epoch {epoch + 1} '
+				f'({self.monitor}: {current:.4f}) -> {self.file_path}'
+			)
+
+
 # =========================
 # TRAINING FUNCTION
 # =========================
@@ -174,13 +212,10 @@ def run_training_session(
 	timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
 	callbacks = [
-		tf.keras.callbacks.ModelCheckpoint(
-			os.path.join(
-				Config.CHECKPOINT_DIR,
-				f'audio_best_model_{timestamp}.h5'
-			),
+		BestPthCheckpoint(
+			checkpoint_dir=Config.CHECKPOINT_DIR,
+			timestamp=timestamp,
 			monitor='val_accuracy',
-			save_best_only=True,
 			mode='max'
 		)
 	]
