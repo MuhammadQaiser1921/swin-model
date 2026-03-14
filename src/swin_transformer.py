@@ -8,6 +8,9 @@ from tensorflow import keras
 from tensorflow.keras import layers
 import numpy as np
 
+def mish(x):
+    return x * tf.math.tanh(tf.math.softplus(x))
+    
 def window_partition(x, window_size):
     B = tf.shape(x)[0]
     H, W, C = tf.shape(x)[1], tf.shape(x)[2], tf.shape(x)[3]
@@ -79,19 +82,30 @@ class WindowAttention(layers.Layer):
         return self.proj_drop(self.proj(x), training=training)
 
 class SwinTransformerBlock(layers.Layer):
-    def __init__(self, dim, num_heads, window_size=7, mlp_ratio=4., drop=0., attn_drop=0., drop_path=0., **kwargs):
+    def __init__(self, dim, num_heads, window_size=7, mlp_ratio=4., drop=0., attn_drop=0., drop_path=0., activation="gelu", **kwargs):
         super().__init__(**kwargs)
         self.dim = dim
         self.window_size = window_size
         self.norm1 = layers.LayerNormalization(epsilon=1e-5)
         self.attn = WindowAttention(dim, window_size, num_heads, attn_drop=attn_drop, proj_drop=drop)
         self.norm2 = layers.LayerNormalization(epsilon=1e-5)
-        self.mlp = keras.Sequential([
-            layers.Dense(int(dim * mlp_ratio), activation='gelu'),
-            layers.Dropout(drop),
-            layers.Dense(dim),
-            layers.Dropout(drop)
-        ])
+        if activation == "gelu":
+    act = "gelu"
+elif activation == "relu":
+    act = "relu"
+elif activation == "swish":
+    act = "swish"
+elif activation == "mish":
+    act = mish
+else:
+    act = "gelu"
+
+self.mlp = keras.Sequential([
+    layers.Dense(int(dim * mlp_ratio), activation=act),
+    layers.Dropout(drop),
+    layers.Dense(dim),
+    layers.Dropout(drop)
+])
         self.drop_path = layers.Identity() # Simplified for stability
 
     def call(self, x, training=False):
@@ -117,7 +131,7 @@ class PatchMerging(layers.Layer):
         x = tf.concat([x0, x1, x2, x3], axis=-1)
         return self.reduction(self.norm(x))
 
-def build_swin_tiny(input_shape, num_classes=2):
+def build_swin_tiny(input_shape, num_classes=2, activation="gelu"):
     inputs = keras.Input(shape=input_shape)
     x = inputs
     if input_shape[-1] == 1: # Audio channel expansion
@@ -129,7 +143,12 @@ def build_swin_tiny(input_shape, num_classes=2):
     dims, heads = [96, 192, 384, 768], [3, 6, 12, 24]
     for i in range(4):
         for j in range(2):
-            x = SwinTransformerBlock(dim=dims[i], num_heads=heads[i], window_size=7)(x)
+            x = SwinTransformerBlock(
+    dim=dims[i],
+    num_heads=heads[i],
+    window_size=7,
+    activation=activation
+)(x)
         if i < 3: x = PatchMerging(dim=dims[i])(x)
     
     x = layers.GlobalAveragePooling2D()(x)
