@@ -50,7 +50,7 @@ def collect_paths(root):
 
 	# limit dataset for faster testing
 	return paths[:20000], labels[:20000]
-
+	
 def load_data():
 
     train_p,train_l = collect_paths(Config.TRAIN_DIR)
