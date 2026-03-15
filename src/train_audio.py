@@ -48,7 +48,7 @@ def collect_paths(root):
                 paths.append(os.path.join(folder,img))
                 labels.append(label)
 
-    return paths,labels
+   return paths[:20000], labels[:20000]
 
 
 def load_data():
