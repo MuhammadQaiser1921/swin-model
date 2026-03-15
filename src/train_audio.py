@@ -34,22 +34,22 @@ class Config:
 # =========================
 def collect_paths(root):
 
-    paths = []
-    labels = []
+	paths = []
+	labels = []
 
-    for cls, label in Config.LABELS.items():
+	for cls, label in Config.LABELS.items():
 
-        folder = os.path.join(root,cls)
+		folder = os.path.join(root, cls)
 
-        for img in os.listdir(folder):
+		for img in os.listdir(folder):
 
-            if img.lower().endswith(Config.IMAGE_EXTS):
+			if img.lower().endswith(Config.IMAGE_EXTS):
 
-                paths.append(os.path.join(folder,img))
-                labels.append(label)
+				paths.append(os.path.join(folder, img))
+				labels.append(label)
 
-   return paths[:20000], labels[:20000]
-
+	# limit dataset for faster testing
+	return paths[:20000], labels[:20000]
 
 def load_data():
 
