@@ -1,241 +1,223 @@
 import os
-import pickle
 import numpy as np
 import tensorflow as tf
+import pandas as pd
 from datetime import datetime
 from swin_transformer import build_swin_tiny
-
 
 # =========================
 # CONFIG
 # =========================
 class Config:
-	DATA_ROOT = '/kaggle/input/datasets/bishertello/asvspoof-21-df-cqt/my_dataset'
 
-	TRAIN_DIR = os.path.join(DATA_ROOT, 'train')
-	VAL_DIR = os.path.join(DATA_ROOT, 'validation')
-	TEST_DIR = os.path.join(DATA_ROOT, 'test')
+    DATA_ROOT = "/kaggle/input/datasets/bishertello/asvspoof-21-df-cqt/my_dataset"
 
-	CHECKPOINT_DIR = '/kaggle/working/models/audio_checkpoints'
-	IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
+    TRAIN_DIR = os.path.join(DATA_ROOT,"train")
+    VAL_DIR = os.path.join(DATA_ROOT,"validation")
+    TEST_DIR = os.path.join(DATA_ROOT,"test")
 
-	LABELS = {'real': 0, 'fake': 1}
+    IMAGE_EXTS = (".jpg",".jpeg",".png")
 
-	epochs = 3
-	batch_size = 16
-	lr = 1e-4
+    LABELS = {"real":0,"fake":1}
 
+    batch_size = 16
+    epochs = 3
+    lr = 1e-4
 
-# =========================
-# DATA LOADER
-# =========================
-def _collect_image_paths(split_root, class_map):
-	paths, labels = [], []
+    CHECKPOINT_DIR = "/kaggle/working/models"
 
-	if not os.path.exists(split_root):
-		return paths, labels
-
-	for class_name, label in class_map.items():
-		class_dir = os.path.join(split_root, class_name)
-		if not os.path.exists(class_dir):
-			continue
-
-		for name in os.listdir(class_dir):
-			if name.lower().endswith(Config.IMAGE_EXTS):
-				paths.append(os.path.join(class_dir, name))
-				labels.append(label)
-
-	return paths, labels
-
-
-def load_and_prepare_data():
-	print('📂 Loading audio CQT dataset paths...')
-
-	train_paths, train_labels = _collect_image_paths(Config.TRAIN_DIR, Config.LABELS)
-	val_paths, val_labels = _collect_image_paths(Config.VAL_DIR, Config.LABELS)
-	test_paths, test_labels = _collect_image_paths(Config.TEST_DIR, Config.LABELS)
-
-	output = {
-		'train_paths': train_paths,
-		'train_labels': train_labels,
-		'val_paths': val_paths,
-		'val_labels': val_labels,
-		'test_paths': test_paths,
-		'test_labels': test_labels
-	}
-
-	print(f"Train samples: {len(output['train_paths'])}")
-	print(f"Val samples: {len(output['val_paths'])}")
-	print(f"Test samples: {len(output['test_paths'])}")
-
-	return output
-
-
-def _evaluate_binary_threshold(model, dataset, threshold=0.5):
-	# Collect true labels from dataset batches.
-	y_true_batches = []
-	for _, labels in dataset:
-		y_true_batches.append(tf.reshape(labels, [-1]))
-
-	if not y_true_batches:
-		return None
-
-	y_true = tf.concat(y_true_batches, axis=0).numpy().astype(np.int32)
-	y_prob = model.predict(dataset, verbose=0).reshape(-1)
-	y_pred = (y_prob >= threshold).astype(np.int32)
-
-	cm = tf.math.confusion_matrix(y_true, y_pred, num_classes=2).numpy()
-	tn, fp, fn, tp = cm.ravel()
-
-	precision = tp / (tp + fp + 1e-8)
-	recall = tp / (tp + fn + 1e-8)
-	f1 = 2.0 * precision * recall / (precision + recall + 1e-8)
-	accuracy = (tp + tn) / max(len(y_true), 1)
-
-	print(f'\n📌 Threshold metrics @ {threshold:.2f}')
-	print(f'Confusion Matrix [[TN, FP], [FN, TP]]:\n{cm}')
-	print(
-		f'Precision: {precision:.4f} | Recall: {recall:.4f} | '
-		f'F1: {f1:.4f} | Accuracy: {accuracy:.4f}'
-	)
-
-	return {
-		'threshold': float(threshold),
-		'tn': int(tn),
-		'fp': int(fp),
-		'fn': int(fn),
-		'tp': int(tp),
-		'precision': float(precision),
-		'recall': float(recall),
-		'f1': float(f1),
-		'threshold_accuracy': float(accuracy)
-	}
-
-
-def _save_model_as_pth(model, file_path):
-	payload = {
-		'model_config_json': model.to_json(),
-		'weights': model.get_weights()
-	}
-	with open(file_path, 'wb') as f:
-		pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-
-class BestPthCheckpoint(tf.keras.callbacks.Callback):
-	def __init__(self, checkpoint_dir, timestamp, monitor='val_accuracy', mode='max'):
-		super().__init__()
-		self.monitor = monitor
-		self.mode = mode
-		self.file_path = os.path.join(checkpoint_dir, f'audio_best_model_{timestamp}.pth')
-		self.best = -np.inf if mode == 'max' else np.inf
-
-	def _is_better(self, current):
-		if self.mode == 'max':
-			return current > self.best
-		return current < self.best
-
-	def on_epoch_end(self, epoch, logs=None):
-		logs = logs or {}
-		current = logs.get(self.monitor)
-		if current is None:
-			return
-
-		if self._is_better(current):
-			self.best = current
-			_save_model_as_pth(self.model, self.file_path)
-			print(
-				f'\n💾 Saved best .pth at epoch {epoch + 1} '
-				f'({self.monitor}: {current:.4f}) -> {self.file_path}'
-			)
+    ACTIVATIONS = ["gelu","swish","mish","relu"]
 
 
 # =========================
-# TRAINING FUNCTION
+# LOAD DATA PATHS
 # =========================
-def run_training_session(
-		data,
-		epochs=Config.epochs,
-		batch_size=Config.batch_size,
-		lr=Config.lr):
+def collect_paths(root):
 
-	os.makedirs(Config.CHECKPOINT_DIR, exist_ok=True)
+    paths = []
+    labels = []
 
-	def _decode(path, label):
-		img = tf.image.decode_image(
-			tf.io.read_file(path),
-			channels=3,
-			expand_animations=False
-		)
-		img = tf.image.resize(img, (224, 224))
-		img = tf.cast(img, tf.float32) / 255.0
-		label = tf.cast(label, tf.float32)
-		return img, label
+    for cls, label in Config.LABELS.items():
 
-	train_ds = (
-		tf.data.Dataset
-		.from_tensor_slices((data['train_paths'], data['train_labels']))
-		.shuffle(10000)
-		.map(_decode, num_parallel_calls=tf.data.AUTOTUNE)
-		.batch(batch_size)
-		.prefetch(tf.data.AUTOTUNE)
-	)
+        folder = os.path.join(root,cls)
 
-	val_ds = (
-		tf.data.Dataset
-		.from_tensor_slices((data['val_paths'], data['val_labels']))
-		.map(_decode, num_parallel_calls=tf.data.AUTOTUNE)
-		.batch(batch_size)
-		.prefetch(tf.data.AUTOTUNE)
-	)
+        for img in os.listdir(folder):
 
-	test_ds = None
-	if data.get('test_paths'):
-		test_ds = (
-			tf.data.Dataset
-			.from_tensor_slices((data['test_paths'], data['test_labels']))
-			.map(_decode, num_parallel_calls=tf.data.AUTOTUNE)
-			.batch(batch_size)
-			.prefetch(tf.data.AUTOTUNE)
-		)
+            if img.lower().endswith(Config.IMAGE_EXTS):
 
-	model = build_swin_tiny(
-		input_shape=(224, 224, 3),
-		num_classes=1
-	)
+                paths.append(os.path.join(folder,img))
+                labels.append(label)
 
-	model.compile(
-		optimizer=tf.keras.optimizers.AdamW(learning_rate=lr),
-		loss='binary_crossentropy',
-		metrics=[tf.keras.metrics.BinaryAccuracy(name='accuracy')]
-	)
+    return paths,labels
 
-	timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-	callbacks = [
-		BestPthCheckpoint(
-			checkpoint_dir=Config.CHECKPOINT_DIR,
-			timestamp=timestamp,
-			monitor='val_accuracy',
-			mode='max'
-		)
-	]
+def load_data():
 
-	print(f'🚀 Training audio model for {epochs} epochs...')
+    train_p,train_l = collect_paths(Config.TRAIN_DIR)
+    val_p,val_l = collect_paths(Config.VAL_DIR)
+    test_p,test_l = collect_paths(Config.TEST_DIR)
 
-	history = model.fit(
-		train_ds,
-		validation_data=val_ds,
-		epochs=epochs,
-		callbacks=callbacks
-	)
+    print("Train:",len(train_p))
+    print("Val:",len(val_p))
+    print("Test:",len(test_p))
 
-	test_metrics = None
-	if test_ds is not None:
-		print('🧪 Evaluating on test split...')
-		test_metrics = model.evaluate(test_ds, return_dict=True)
-		print(f'Test metrics: {test_metrics}')
-		threshold_metrics = _evaluate_binary_threshold(model, test_ds, threshold=0.5)
-		if threshold_metrics is not None:
-			test_metrics['threshold_metrics'] = threshold_metrics
+    return train_p,train_l,val_p,val_l,test_p,test_l
 
-	return model, history, test_metrics
+
+# =========================
+# IMAGE DECODER
+# =========================
+def decode(path,label):
+
+    img = tf.io.read_file(path)
+
+    img = tf.image.decode_image(img,channels=3)
+
+    img = tf.image.resize(img,(224,224))
+
+    img = tf.cast(img,tf.float32)/255.0
+
+    label = tf.cast(label,tf.float32)
+
+    return img,label
+
+
+# =========================
+# DATASET BUILDER
+# =========================
+def make_dataset(paths,labels,shuffle=False):
+
+    ds = tf.data.Dataset.from_tensor_slices((paths,labels))
+
+    if shuffle:
+        ds = ds.shuffle(10000)
+
+    ds = ds.map(decode,num_parallel_calls=tf.data.AUTOTUNE)
+
+    ds = ds.batch(Config.batch_size)
+
+    ds = ds.prefetch(tf.data.AUTOTUNE)
+
+    return ds
+
+
+# =========================
+# METRICS
+# =========================
+def evaluate_metrics(model,ds):
+
+    y_true=[]
+    y_pred=[]
+
+    for x,y in ds:
+
+        p=model.predict(x,verbose=0)
+
+        y_true.extend(y.numpy())
+
+        y_pred.extend((p>0.5).astype(int).flatten())
+
+    y_true=np.array(y_true)
+    y_pred=np.array(y_pred)
+
+    tp=np.sum((y_true==1)&(y_pred==1))
+    tn=np.sum((y_true==0)&(y_pred==0))
+    fp=np.sum((y_true==0)&(y_pred==1))
+    fn=np.sum((y_true==1)&(y_pred==0))
+
+    precision=tp/(tp+fp+1e-8)
+    recall=tp/(tp+fn+1e-8)
+    f1=2*(precision*recall)/(precision+recall+1e-8)
+    acc=(tp+tn)/len(y_true)
+
+    return acc,precision,recall,f1
+
+
+# =========================
+# TRAIN EXPERIMENTS
+# =========================
+def run_experiments():
+
+    os.makedirs(Config.CHECKPOINT_DIR,exist_ok=True)
+
+    train_p,train_l,val_p,val_l,test_p,test_l=load_data()
+
+    train_ds=make_dataset(train_p,train_l,shuffle=True)
+    val_ds=make_dataset(val_p,val_l)
+    test_ds=make_dataset(test_p,test_l)
+
+    results=[]
+
+    for act in Config.ACTIVATIONS:
+
+        print("\n==========================")
+        print("Training with:",act)
+        print("==========================")
+
+        model=build_swin_tiny(
+            input_shape=(224,224,3),
+            num_classes=1,
+            activation=act
+        )
+
+        model.compile(
+
+            optimizer=tf.keras.optimizers.AdamW(Config.lr),
+
+            loss="binary_crossentropy",
+
+            metrics=["accuracy"]
+
+        )
+
+        model.fit(
+
+            train_ds,
+
+            validation_data=val_ds,
+
+            epochs=Config.epochs
+
+        )
+
+        acc,prec,rec,f1=evaluate_metrics(model,test_ds)
+
+        print("Test Accuracy:",acc)
+
+        print("Precision:",prec)
+
+        print("Recall:",rec)
+
+        print("F1:",f1)
+
+        save_path=os.path.join(
+            Config.CHECKPOINT_DIR,
+            f"swin_audio_{act}.h5"
+        )
+
+        model.save(save_path)
+
+        results.append({
+
+            "Activation":act,
+            "Accuracy":acc,
+            "Precision":prec,
+            "Recall":rec,
+            "F1":f1
+        })
+
+    df=pd.DataFrame(results)
+
+    print("\nFINAL RESULTS TABLE")
+
+    print(df)
+
+    df.to_csv("/kaggle/working/audio_results.csv",index=False)
+
+
+# =========================
+# RUN
+# =========================
+if __name__=="__main__":
+
+    run_experiments()
