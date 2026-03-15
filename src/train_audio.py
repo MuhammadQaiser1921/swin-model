@@ -57,8 +57,13 @@ def collect_paths(root):
 
 def load_data():
 
+    print("Loading training paths...")
     train_p, train_l = collect_paths(Config.TRAIN_DIR)
+
+    print("Loading validation paths...")
     val_p, val_l = collect_paths(Config.VAL_DIR)
+
+    print("Loading test paths...")
     test_p, test_l = collect_paths(Config.TEST_DIR)
 
     print("Train:", len(train_p))
