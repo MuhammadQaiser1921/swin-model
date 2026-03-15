@@ -67,21 +67,21 @@ def load_data():
 # =========================
 # IMAGE DECODER
 # =========================
-def decode(path,label):
+def decode(path, label):
 
     img = tf.io.read_file(path)
 
-    img = tf.image.decode_image(img,channels=3)
+    img = tf.image.decode_jpeg(img, channels=3)
 
-    img = tf.image.resize(img,(224,224))
+    img.set_shape([None, None, 3])
 
-    img = tf.cast(img,tf.float32)/255.0
+    img = tf.image.resize(img, (224, 224))
 
-    label = tf.cast(label,tf.float32)
+    img = tf.cast(img, tf.float32) / 255.0
 
-    return img,label
+    label = tf.cast(label, tf.float32)
 
-
+    return img, label
 # =========================
 # DATASET BUILDER
 # =========================
