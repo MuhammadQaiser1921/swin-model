@@ -52,7 +52,7 @@ def collect_paths(root):
                 labels.append(label)
 
     # limit dataset for faster Kaggle testing
-    return paths[:20000], labels[:20000]
+    return paths[:1000], labels[:1000]
 
 
 def load_data():
