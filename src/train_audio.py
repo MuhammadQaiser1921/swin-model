@@ -4,7 +4,7 @@ import tensorflow as tf
 import pandas as pd
 from swin_transformer import build_swin_tiny
 
-
+print("SCRIPT STARTED")
 # =========================
 # CONFIG
 # =========================
