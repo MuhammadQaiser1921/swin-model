@@ -49,7 +49,7 @@ def collect_paths(root):
 				labels.append(label)
 
 	# limit dataset for faster testing
-	return paths[:20000], labels[:20000]
+  return paths[:20000], labels[:20000]
 	
 def load_data():
 
