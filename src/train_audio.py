@@ -246,4 +246,5 @@ def run_experiments():
 # RUN
 # =========================
 if __name__ == "__main__":
+    print("RUNNING MAIN FUNCTION...")
     run_experiments()
