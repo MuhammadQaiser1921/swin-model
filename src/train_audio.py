@@ -5,11 +5,13 @@ import pandas as pd
 from swin_transformer import build_swin_tiny
 
 print("SCRIPT STARTED")
+
 # =========================
 # CONFIG
 # =========================
 class Config:
 
+    # ✅ FIXED PATH (most likely correct for Kaggle)
     DATA_ROOT = "/kaggle/input/datasets/bishertello/asvspoof-21-df-cqt/my_dataset"
 
     TRAIN_DIR = os.path.join(DATA_ROOT, "train")
@@ -37,38 +39,54 @@ def collect_paths(root):
     paths = []
     labels = []
 
-    for cls, label in Config.LABELS.items():
+    if not os.path.exists(root):
+        print(f"❌ Folder NOT found: {root}")
+        return [], []
 
-        folder = os.path.join(root, cls)
+    for cls in os.listdir(root):
 
-        if not os.path.exists(folder):
+        cls_path = os.path.join(root, cls)
+
+        if not os.path.isdir(cls_path):
             continue
 
-        for img in os.listdir(folder):
+        # ✅ Flexible labeling
+        label = 0 if "real" in cls.lower() else 1
+
+        for img in os.listdir(cls_path):
 
             if img.lower().endswith(Config.IMAGE_EXTS):
 
-                paths.append(os.path.join(folder, img))
+                paths.append(os.path.join(cls_path, img))
                 labels.append(label)
 
-    # limit dataset for faster Kaggle testing
+    print(f"Loaded {len(paths)} samples from {root}")
+
+    # limit for faster testing
     return paths[:1000], labels[:1000]
 
 
 def load_data():
 
-    print("Loading training paths...")
+    print("\n🔍 Checking dataset structure...")
+    print("Input dir:", os.listdir("/kaggle/input"))
+
+    print("\nLoading training paths...")
     train_p, train_l = collect_paths(Config.TRAIN_DIR)
 
-    print("Loading validation paths...")
+    print("\nLoading validation paths...")
     val_p, val_l = collect_paths(Config.VAL_DIR)
 
-    print("Loading test paths...")
+    print("\nLoading test paths...")
     test_p, test_l = collect_paths(Config.TEST_DIR)
 
+    print("\n📊 DATA SUMMARY")
     print("Train:", len(train_p))
     print("Val:", len(val_p))
     print("Test:", len(test_p))
+
+    print("\nSample train paths:", train_p[:3])
+    print("Sample labels:", train_l[:3])
 
     return train_p, train_l, val_p, val_l, test_p, test_l
 
@@ -80,15 +98,19 @@ def decode(path, label):
 
     img = tf.io.read_file(path)
 
-    img = tf.image.decode_jpeg(img, channels=3)
+    # ✅ FIX: supports PNG + JPG
+    img = tf.image.decode_image(img, channels=3)
 
+    # ✅ REQUIRED after decode_image
     img.set_shape([None, None, 3])
 
     img = tf.image.resize(img, (224, 224))
 
     img = tf.cast(img, tf.float32) / 255.0
 
+    # ✅ FIX: proper shape for BCE
     label = tf.cast(label, tf.float32)
+    label = tf.expand_dims(label, axis=-1)
 
     return img, label
 
@@ -124,7 +146,7 @@ def evaluate_metrics(model, ds):
 
         preds = model.predict(x, verbose=0)
 
-        y_true.extend(y.numpy())
+        y_true.extend(y.numpy().flatten())
         y_pred.extend((preds > 0.5).astype(int).flatten())
 
     y_true = np.array(y_true)
@@ -152,6 +174,11 @@ def run_experiments():
 
     train_p, train_l, val_p, val_l, test_p, test_l = load_data()
 
+    # ❌ STOP if dataset not loaded
+    if len(train_p) == 0:
+        print("\n❌ ERROR: No training data found. Check dataset path.")
+        return
+
     train_ds = make_dataset(train_p, train_l, shuffle=True)
     val_ds = make_dataset(val_p, val_l)
     test_ds = make_dataset(test_p, test_l)
@@ -161,7 +188,7 @@ def run_experiments():
     for act in Config.ACTIVATIONS:
 
         print("\n==========================")
-        print("Training with:", act)
+        print("🚀 Training with:", act)
         print("==========================")
 
         model = build_swin_tiny(
@@ -176,6 +203,8 @@ def run_experiments():
             metrics=["accuracy"]
         )
 
+        print("Starting training...")
+
         model.fit(
             train_ds,
             validation_data=val_ds,
@@ -184,7 +213,8 @@ def run_experiments():
 
         acc, prec, rec, f1 = evaluate_metrics(model, test_ds)
 
-        print("Test Accuracy:", acc)
+        print("\n✅ RESULTS")
+        print("Accuracy:", acc)
         print("Precision:", prec)
         print("Recall:", rec)
         print("F1:", f1)
@@ -206,7 +236,7 @@ def run_experiments():
 
     df = pd.DataFrame(results)
 
-    print("\nFINAL RESULTS TABLE")
+    print("\n📊 FINAL RESULTS TABLE")
     print(df)
 
     df.to_csv("/kaggle/working/audio_results.csv", index=False)
@@ -216,5 +246,4 @@ def run_experiments():
 # RUN
 # =========================
 if __name__ == "__main__":
-
     run_experiments()
