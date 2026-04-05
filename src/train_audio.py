@@ -246,5 +246,10 @@ def run_experiments():
 # RUN
 # =========================
 if __name__ == "__main__":
-    print("🚀 FORCE RUN START", flush=True)
+   print("🚀 FORCE START", flush=True)
+
+def main():
+    print("🔥 INSIDE MAIN", flush=True)
     run_experiments()
+
+main()
