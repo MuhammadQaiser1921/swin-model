@@ -246,5 +246,5 @@ def run_experiments():
 # RUN
 # =========================
 if __name__ == "__main__":
-    print("RUNNING MAIN FUNCTION...")
+    print("🚀 FORCE RUN START", flush=True)
     run_experiments()
