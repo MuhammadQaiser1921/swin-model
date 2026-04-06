@@ -59,12 +59,12 @@ def update_docx(docx_path, metrics, note):
 
     rows = [
         ("Metric", "Value"),
-        ("Train Accuracy", f"{metrics['train_acc']:.6f}"),
-        ("Train Loss", f"{metrics['train_loss']:.6f}"),
-        ("Validation Accuracy", f"{metrics['val_acc']:.6f}"),
-        ("Validation Loss", f"{metrics['val_loss']:.6f}"),
-        ("Test Accuracy", f"{metrics['test_acc']:.6f}"),
-        ("Test Loss", f"{metrics['test_loss']:.6f}"),
+        ("Train Accuracy", str(metrics['train_acc'])),
+        ("Train Loss", str(metrics['train_loss'])),
+        ("Validation Accuracy", str(metrics['val_acc'])),
+        ("Validation Loss", str(metrics['val_loss'])),
+        ("Test Accuracy", str(metrics['test_acc'])),
+        ("Test Loss", str(metrics['test_loss'])),
     ]
 
     for i, (k, v) in enumerate(rows):
