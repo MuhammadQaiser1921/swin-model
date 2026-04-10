@@ -86,13 +86,13 @@ class SwinTransformerBlock(layers.Layer):
         self.norm1 = layers.LayerNormalization(epsilon=1e-5)
         self.attn = WindowAttention(dim, window_size, num_heads, attn_drop=attn_drop, proj_drop=drop)
         self.norm2 = layers.LayerNormalization(epsilon=1e-5)
-        self.mlp = keras.Sequential([
-            layers.Dense(int(dim * mlp_ratio), activation='swish'),
-            layers.Dropout(drop),
-            layers.Dense(dim),
-            layers.Dropout(drop)
-        ])
-        self.drop_path = layers.Identity() # Simplified for stability
+    self.mlp = keras.Sequential([
+    layers.Dense(int(dim * mlp_ratio), activation=tf.nn.mish),
+    layers.Dropout(drop),
+    layers.Dense(dim),
+    layers.Dropout(drop)
+     ])
+    self.drop_path = layers.Identity() # Simplified for stability
 
     def call(self, x, training=False):
         H, W, C = tf.shape(x)[1], tf.shape(x)[2], tf.shape(x)[3]
