@@ -4,7 +4,7 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 from datetime import datetime
-from swin_transformer import build_swin_tiny
+from swin_transformer import build_video_swin
 
 
 # =========================
@@ -24,6 +24,11 @@ class Config:
     epochs = 3
     batch_size = 16
     lr = 1e-4
+    mlp_activation = 'mish'
+    attention_activation = 'softmax'
+    output_activation = 'sigmoid'
+    classifier_hidden_dims = (512, 128)
+    classifier_dropout = 0.2
 
 
 # =========================
@@ -223,9 +228,14 @@ def run_training_session(
     # BUILD MODEL ON GPU (CRITICAL FIX)
     # ==============================
     
-    model = build_swin_tiny(
+    model = build_video_swin(
             input_shape=(224, 224, 3),
-            num_classes=1
+            num_classes=1,
+            mlp_activation=Config.mlp_activation,
+            attention_activation=Config.attention_activation,
+            output_activation=Config.output_activation,
+            classifier_hidden_dims=Config.classifier_hidden_dims,
+            classifier_dropout=Config.classifier_dropout
         )
 
     # -------- Compile --------
