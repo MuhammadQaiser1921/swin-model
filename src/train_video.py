@@ -186,7 +186,7 @@ def run_training_session(
 
     # -------- Decode Function --------
     def _decode(path, label):
-    path = tf.cast(path, tf.string)  # <-- critical guard
+      path = tf.cast(path, tf.string)  # <-- critical guard
 
     img = tf.image.decode_image(
         tf.io.read_file(path),
