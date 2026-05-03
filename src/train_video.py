@@ -186,18 +186,18 @@ def run_training_session(
 
     # -------- Decode Function --------
     def _decode(path, label):
-        path = tf.cast(path, tf.string)  # <-- critical guard
+    path = tf.cast(path, tf.string)  # <-- critical guard
 
-        img = tf.image.decode_image(
-            tf.io.read_file(path),
-            channels=3,
-            expand_animations=False
-        )
-        img = tf.image.resize(img, (224, 224))
-        img = tf.cast(img, tf.float32) / 255.0
-        label = tf.cast(label, tf.float32)
+    img = tf.image.decode_image(
+        tf.io.read_file(path),
+        channels=3,
+        expand_animations=False
+    )
+    img = tf.image.resize(img, (224, 224))
+    img = tf.cast(img, tf.float32) / 255.0
+    label = tf.cast(label, tf.float32)
 
-        return img, label
+    return img, label
     # -------- tf.data Pipeline --------
     train_ds = (
         tf.data.Dataset
