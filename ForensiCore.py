@@ -84,9 +84,7 @@ class WindowAttention(layers.Layer):
         relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
         relative_position_index = relative_coords.sum(-1)
 
-        self.relative_position_index = tf.Variable(
-            initial_value=tf.convert_to_tensor(relative_position_index), trainable=False
-        )
+        self.relative_position_index = tf.constant(relative_position_index, dtype=tf.int32)
 
     def call(self, x, mask=None):
         _, size, channels = x.shape
@@ -232,7 +230,7 @@ class SwinTransformer(layers.Layer):
             )
             attn_mask = tf.where(attn_mask != 0, -100.0, attn_mask)
             attn_mask = tf.where(attn_mask == 0, 0.0, attn_mask)
-            self.attn_mask = tf.Variable(initial_value=attn_mask, trainable=False)
+            self.attn_mask = tf.constant(attn_mask, dtype=tf.float32)
 
     def call(self, x):
         height, width = self.num_patch
