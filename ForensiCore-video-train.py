@@ -1,8 +1,9 @@
 import matplotlib.pyplot as plt
 import numpy as np
 from collections import Counter
+import tensorflow as tf
 from tensorflow import keras
-from tensorflow.keras.preprocessing.image import img_to_array, load_img
+from tensorflow.keras.preprocessing.image import load_img
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 from pathlib import Path
 from ForensiCore import build_video_model
@@ -26,6 +27,7 @@ LABEL_SMOOTHING = 0.1
 BATCH_SIZE = 32
 EPOCHS = 3
 RANDOM_STATE = 3
+AUTOTUNE = tf.data.AUTOTUNE
 
 # Input size control
 # - 'fixed': always resize to FIXED_INPUT_SIZE
@@ -209,19 +211,31 @@ def split_balanced(paths, labels, train_split=0.7, val_split=0.15, seed=3):
     )
 
 
-def load_images_from_paths(paths, labels, target_shape):
-    x_data = []
-    y_data = []
-    target_size = target_shape[:2]
+def build_tf_dataset(paths, labels, target_shape, batch_size, shuffle=False, seed=3):
+    target_height, target_width = target_shape[:2]
+    paths = np.asarray(paths, dtype=str)
+    labels = np.asarray(labels, dtype=np.int32)
 
-    for img_path, label in zip(paths, labels):
-        image = img_to_array(load_img(img_path, target_size=target_size)) / 255.0
-        x_data.append(image)
-        y_data.append(label)
+    dataset = tf.data.Dataset.from_tensor_slices((paths, labels))
+    if shuffle:
+        dataset = dataset.shuffle(
+            buffer_size=len(paths),
+            seed=seed,
+            reshuffle_each_iteration=True,
+        )
 
-    x_data = np.asarray(x_data, dtype=np.float32)
-    y_data = keras.utils.to_categorical(np.asarray(y_data), NUM_CLASSES)
-    return x_data, y_data
+    def _decode_and_preprocess(path, label):
+        image_bytes = tf.io.read_file(path)
+        image = tf.io.decode_image(image_bytes, channels=3, expand_animations=False)
+        image = tf.image.resize(image, [target_height, target_width])
+        image = tf.cast(image, tf.float32) / 255.0
+        label = tf.one_hot(label, depth=NUM_CLASSES, dtype=tf.float32)
+        return image, label
+
+    dataset = dataset.map(_decode_and_preprocess, num_parallel_calls=AUTOTUNE)
+    dataset = dataset.batch(batch_size)
+    dataset = dataset.prefetch(AUTOTUNE)
+    return dataset
 
 
 def run_video_pipeline():
@@ -264,13 +278,23 @@ def run_video_pipeline():
     print(f"Total samples used: {len(all_labels)}")
     print(f"Split totals -> train: {len(train_paths)}, val: {len(val_paths)}, test: {len(test_paths)}")
 
-    x_train, y_train = load_images_from_paths(train_paths, y_train_labels, input_shape)
-    x_val, y_val = load_images_from_paths(val_paths, y_val_labels, input_shape)
-    x_test, y_test = load_images_from_paths(test_paths, y_test_labels, input_shape)
+    print_stage_banner('Building tf.data Pipelines')
+    train_ds = build_tf_dataset(
+        train_paths,
+        y_train_labels,
+        input_shape,
+        BATCH_SIZE,
+        shuffle=True,
+        seed=RANDOM_STATE,
+    )
+    val_ds = build_tf_dataset(val_paths, y_val_labels, input_shape, BATCH_SIZE)
+    test_ds = build_tf_dataset(test_paths, y_test_labels, input_shape, BATCH_SIZE)
 
-    print(f"x_train shape: {x_train.shape} - y_train shape: {y_train.shape}")
-    print(f"x_val shape: {x_val.shape} - y_val shape: {y_val.shape}")
-    print(f"x_test shape: {x_test.shape} - y_test shape: {y_test.shape}")
+    train_batches = (len(train_paths) + BATCH_SIZE - 1) // BATCH_SIZE
+    val_batches = (len(val_paths) + BATCH_SIZE - 1) // BATCH_SIZE
+    test_batches = (len(test_paths) + BATCH_SIZE - 1) // BATCH_SIZE
+    print(f"Streaming dataset configured with input_shape: {input_shape}")
+    print(f"Train batches: {train_batches}, Validation batches: {val_batches}, Test batches: {test_batches}")
 
     model = build_video_model(
         input_shape=input_shape,
@@ -311,11 +335,9 @@ def run_video_pipeline():
 
     print_stage_banner('Training Started')
     history = model.fit(
-        x_train,
-        y_train,
-        batch_size=BATCH_SIZE,
+        train_ds,
         epochs=EPOCHS,
-        validation_data=(x_val, y_val),
+        validation_data=val_ds,
         callbacks=[early_stopping, model_checkpoint, reduce_lr],
     )
 
@@ -327,7 +349,7 @@ def run_video_pipeline():
     print(f"Best val_accuracy: {best_val_acc:.4f}")
     print(f"Best val_loss: {best_val_loss:.4f}")
 
-    test_loss, test_acc = model.evaluate(x_test, y_test, batch_size=BATCH_SIZE, verbose=1)
+    test_loss, test_acc = model.evaluate(test_ds, verbose=1)
     print(f"Test loss: {test_loss:.4f}")
     print(f"Test accuracy: {test_acc:.4f}")
 
