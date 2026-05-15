@@ -1,0 +1,281 @@
+import matplotlib.pyplot as plt
+import numpy as np
+from pathlib import Path
+from tensorflow import keras
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
+from tensorflow.keras.preprocessing.image import img_to_array, load_img
+
+from ForensiCore import build_audio_model
+
+MODEL_NAME = 'ForensiCore-Audio'
+NUM_CLASSES = 2
+PATCH_SIZE = (3, 3)
+EMBED_DIM = 64
+NUM_HEADS = 8
+WINDOW_SIZE = 2
+SHIFT_SIZE = 1
+NUM_MLP = 256
+QKV_BIAS = True
+DROPOUT_RATE = 0.03
+LEARNING_RATE = 1e-3
+WEIGHT_DECAY = 1e-4
+LABEL_SMOOTHING = 0.1
+BATCH_SIZE = 16
+EPOCHS = 50
+RANDOM_STATE = 3
+
+DATA_ROOT = '/kaggle/input/datasets/bishertello/asvspoof-21-df-cqt/my_dataset'
+TRAIN_DIR = str(Path(DATA_ROOT) / 'train')
+VAL_DIR = str(Path(DATA_ROOT) / 'validation')
+TEST_DIR = str(Path(DATA_ROOT) / 'test')
+
+IMAGE_EXTS = ('.jpg', '.jpeg', '.png')
+LABELS = {'real': 0, 'fake': 1}
+
+# Input size control
+# - 'fixed': always resize to FIXED_INPUT_SIZE
+# - 'auto': scan training images and select most common size
+INPUT_SIZE_MODE = 'fixed'
+FIXED_INPUT_SIZE = (224, 224)
+SIZE_SCAN_MAX_SAMPLES = 3000
+
+
+def print_stage_banner(title):
+    print('\n' + '=' * 70)
+    print(title)
+    print('=' * 70)
+
+
+def print_binary_counts(header, labels):
+    labels = np.asarray(labels)
+    real_count = int(np.sum(labels == 0))
+    fake_count = int(np.sum(labels == 1))
+    print(f"{header}: {real_count} is real and {fake_count} is fake")
+
+
+def collect_labeled_paths(root_dir, label_map, image_exts):
+    root_path = Path(root_dir)
+    if not root_path.exists():
+        raise ValueError(f"Directory not found: {root_dir}")
+
+    file_paths = []
+    labels = []
+
+    for path in root_path.rglob('*'):
+        if not path.is_file() or path.suffix.lower() not in image_exts:
+            continue
+
+        path_parts_lower = {part.lower() for part in path.parts}
+        matched_label = None
+        for folder_name, label in label_map.items():
+            if folder_name.lower() in path_parts_lower:
+                matched_label = label
+                break
+
+        if matched_label is not None:
+            file_paths.append(str(path))
+            labels.append(matched_label)
+
+    if len(file_paths) == 0:
+        raise ValueError(f"No labeled images found in: {root_dir}")
+
+    return file_paths, np.asarray(labels)
+
+
+def scan_image_sizes(paths, max_samples=3000, seed=3):
+    if len(paths) == 0:
+        return {}
+
+    rng = np.random.default_rng(seed)
+    sample_count = min(max_samples, len(paths))
+    sampled_idx = rng.choice(len(paths), size=sample_count, replace=False)
+
+    size_counter = {}
+    for idx in sampled_idx:
+        try:
+            with load_img(paths[idx]) as image:
+                width, height = image.size
+            key = (height, width)
+            size_counter[key] = size_counter.get(key, 0) + 1
+        except Exception:
+            continue
+
+    return size_counter
+
+
+def resolve_input_shape(paths):
+    size_counter = scan_image_sizes(paths, max_samples=SIZE_SCAN_MAX_SAMPLES, seed=RANDOM_STATE)
+    print_stage_banner('Dataset Image Size Scan')
+
+    if not size_counter:
+        print('No image sizes scanned successfully. Falling back to fixed size.')
+        return (FIXED_INPUT_SIZE[0], FIXED_INPUT_SIZE[1], 3)
+
+    top_sizes = sorted(size_counter.items(), key=lambda item: item[1], reverse=True)[:5]
+    print('Top image sizes (height, width) from sampled files:')
+    for (h, w), count in top_sizes:
+        print(f"- {(h, w)} -> {count} samples")
+
+    most_common_size = top_sizes[0][0]
+    if INPUT_SIZE_MODE.lower() == 'auto':
+        chosen_size = most_common_size
+        print(f"Auto mode: selected most common size {chosen_size}")
+    else:
+        chosen_size = FIXED_INPUT_SIZE
+        print(f"Fixed mode: forcing resize to {chosen_size}")
+        if chosen_size != most_common_size:
+            print(f"Note: most common dataset size is {most_common_size}, but fixed size is {chosen_size}")
+
+    return (chosen_size[0], chosen_size[1], 3)
+
+
+def balance_paths(file_paths, labels, seed=3):
+    rng = np.random.default_rng(seed)
+    real_idx = np.where(labels == 0)[0]
+    fake_idx = np.where(labels == 1)[0]
+    min_count = min(len(real_idx), len(fake_idx))
+
+    if min_count == 0:
+        raise ValueError('Cannot balance data: one class has zero samples.')
+
+    real_bal = rng.choice(real_idx, size=min_count, replace=False)
+    fake_bal = rng.choice(fake_idx, size=min_count, replace=False)
+    balanced_idx = np.concatenate([real_bal, fake_bal])
+    rng.shuffle(balanced_idx)
+
+    file_paths = np.asarray(file_paths)
+    return file_paths[balanced_idx].tolist(), labels[balanced_idx]
+
+
+def load_images_from_paths(paths, labels, target_shape):
+    x_data = []
+    y_data = []
+    target_size = target_shape[:2]
+
+    for img_path, label in zip(paths, labels):
+        image = img_to_array(load_img(img_path, target_size=target_size)) / 255.0
+        x_data.append(image)
+        y_data.append(label)
+
+    x_data = np.asarray(x_data, dtype=np.float32)
+    y_data = keras.utils.to_categorical(np.asarray(y_data), NUM_CLASSES)
+    return x_data, y_data
+
+
+def run_audio_pipeline():
+    print_stage_banner('Collecting Spectrogram Paths')
+    train_paths, train_labels = collect_labeled_paths(TRAIN_DIR, LABELS, IMAGE_EXTS)
+    val_paths, val_labels = collect_labeled_paths(VAL_DIR, LABELS, IMAGE_EXTS)
+    test_paths, test_labels = collect_labeled_paths(TEST_DIR, LABELS, IMAGE_EXTS)
+
+    input_shape = resolve_input_shape(train_paths)
+
+    print_binary_counts('Train (before balancing)', train_labels)
+    print_binary_counts('Validation (before balancing)', val_labels)
+    print_binary_counts('Test (before balancing)', test_labels)
+
+    train_paths, train_labels = balance_paths(train_paths, train_labels, seed=RANDOM_STATE)
+    val_paths, val_labels = balance_paths(val_paths, val_labels, seed=RANDOM_STATE + 1)
+    test_paths, test_labels = balance_paths(test_paths, test_labels, seed=RANDOM_STATE + 2)
+
+    print_binary_counts('Train (balanced)', train_labels)
+    print_binary_counts('Validation (balanced)', val_labels)
+    print_binary_counts('Test (balanced)', test_labels)
+
+    print_stage_banner('Loading Spectrogram Images')
+    x_train, y_train = load_images_from_paths(train_paths, train_labels, input_shape)
+    x_val, y_val = load_images_from_paths(val_paths, val_labels, input_shape)
+    x_test, y_test = load_images_from_paths(test_paths, test_labels, input_shape)
+
+    print(f"input_shape: {input_shape}")
+    print(f"x_train shape: {x_train.shape} - y_train shape: {y_train.shape}")
+    print(f"x_val shape: {x_val.shape} - y_val shape: {y_val.shape}")
+    print(f"x_test shape: {x_test.shape} - y_test shape: {y_test.shape}")
+
+    model = build_audio_model(
+        input_shape=input_shape,
+        num_classes=NUM_CLASSES,
+        patch_size=PATCH_SIZE,
+        embed_dim=EMBED_DIM,
+        num_heads=NUM_HEADS,
+        window_size=WINDOW_SIZE,
+        shift_size=SHIFT_SIZE,
+        num_mlp=NUM_MLP,
+        qkv_bias=QKV_BIAS,
+        dropout_rate=DROPOUT_RATE,
+        learning_rate=LEARNING_RATE,
+        weight_decay=WEIGHT_DECAY,
+        label_smoothing=LABEL_SMOOTHING,
+    )
+
+    model.summary()
+
+    early_stopping = EarlyStopping(
+        monitor='val_accuracy',
+        mode='max',
+        patience=5,
+        verbose=1,
+        restore_best_weights=True,
+    )
+    model_checkpoint = ModelCheckpoint(
+        f"{MODEL_NAME}-best.keras",
+        monitor='val_accuracy',
+        mode='max',
+        save_best_only=True,
+        verbose=1,
+    )
+    reduce_lr = ReduceLROnPlateau(
+        monitor='val_loss',
+        factor=0.5,
+        patience=2,
+        min_lr=1e-6,
+        verbose=1,
+    )
+
+    print_stage_banner('Training Started')
+    history = model.fit(
+        x_train,
+        y_train,
+        batch_size=BATCH_SIZE,
+        epochs=EPOCHS,
+        validation_data=(x_val, y_val),
+        callbacks=[early_stopping, model_checkpoint, reduce_lr],
+    )
+
+    best_epoch = int(np.argmax(history.history['val_accuracy']) + 1)
+    best_val_acc = float(np.max(history.history['val_accuracy']))
+    best_val_loss = float(np.min(history.history['val_loss']))
+
+    print_stage_banner('Training Summary')
+    print(f"Best epoch: {best_epoch}")
+    print(f"Best val_accuracy: {best_val_acc:.4f}")
+    print(f"Best val_loss: {best_val_loss:.4f}")
+
+    test_loss, test_acc = model.evaluate(x_test, y_test, batch_size=BATCH_SIZE, verbose=1)
+    print(f"Test loss: {test_loss:.4f}")
+    print(f"Test accuracy: {test_acc:.4f}")
+
+    model.save(MODEL_NAME)
+    print(f"model saved: {MODEL_NAME}")
+
+    plt.plot(history.history['accuracy'], label='train_accuracy')
+    plt.plot(history.history['val_accuracy'], label='val_accuracy')
+    plt.title('Model Accuracy')
+    plt.xlabel('Epochs')
+    plt.legend(loc='upper left')
+    plt.savefig(f'{MODEL_NAME}-acc.png')
+
+    plt.plot(history.history['loss'], label='train_loss')
+    plt.plot(history.history['val_loss'], label='val_loss')
+    plt.title('Model Loss')
+    plt.xlabel('Epochs')
+    plt.legend(loc='upper left')
+    plt.savefig(f'{MODEL_NAME}-loss.png')
+
+
+def main():
+    run_audio_pipeline()
+
+
+if __name__ == '__main__':
+    main()
