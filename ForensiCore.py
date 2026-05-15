@@ -376,9 +376,9 @@ def _build_forensicore_model(
     num_mlp=256,
     qkv_bias=True,
     dropout_rate=0.03,
-    learning_rate=1e-3,
+    learning_rate=3e-4,
     weight_decay=1e-4,
-    label_smoothing=0.1,
+    label_smoothing=0.02,
 ):
     num_patch_x = input_shape[0] // patch_size[0]
     num_patch_y = input_shape[1] // patch_size[1]
@@ -459,7 +459,10 @@ def _build_forensicore_model(
     model.compile(
         loss=keras.losses.CategoricalCrossentropy(label_smoothing=label_smoothing),
         optimizer=optimizer,
-        metrics=[keras.metrics.BinaryAccuracy(name="accuracy")],
+        metrics=[
+            keras.metrics.CategoricalAccuracy(name="accuracy"),
+            keras.metrics.AUC(name="auc", multi_label=True, num_labels=num_classes),
+        ],
     )
 
     return model
