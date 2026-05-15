@@ -1,5 +1,6 @@
 import argparse
 import importlib.util
+import sys
 from pathlib import Path
 
 
@@ -7,6 +8,10 @@ def _load_pipeline_function(script_name, function_name):
     script_path = Path(__file__).parent / script_name
     if not script_path.exists():
         raise FileNotFoundError(f"Script not found: {script_path}")
+
+    repo_dir = str(script_path.parent)
+    if repo_dir not in sys.path:
+        sys.path.insert(0, repo_dir)
 
     spec = importlib.util.spec_from_file_location(script_path.stem, script_path)
     if spec is None or spec.loader is None:

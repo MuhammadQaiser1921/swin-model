@@ -1,8 +1,12 @@
 import tensorflow as tf
-import tensorflow_addons as tfa
 from tensorflow import keras
 from tensorflow.keras import layers
 import numpy as np
+
+try:
+    import tensorflow_addons as tfa
+except ImportError:
+    tfa = None
 
 
 def window_partition(x, window_size):
@@ -433,11 +437,18 @@ def _build_forensicore_model(
     outputs = layers.Dense(num_classes, activation="softmax")(x)
     model = keras.Model(inputs, outputs)
 
+    if tfa is not None:
+        optimizer = tfa.optimizers.AdamW(
+            learning_rate=learning_rate, weight_decay=weight_decay
+        )
+    else:
+        optimizer = keras.optimizers.AdamW(
+            learning_rate=learning_rate, weight_decay=weight_decay
+        )
+
     model.compile(
         loss=keras.losses.CategoricalCrossentropy(label_smoothing=label_smoothing),
-        optimizer=tfa.optimizers.AdamW(
-            learning_rate=learning_rate, weight_decay=weight_decay
-        ),
+        optimizer=optimizer,
         metrics=[keras.metrics.BinaryAccuracy(name="accuracy")],
     )
 
