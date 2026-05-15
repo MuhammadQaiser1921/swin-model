@@ -84,7 +84,13 @@ class WindowAttention(layers.Layer):
         relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
         relative_position_index = relative_coords.sum(-1)
 
-        self.relative_position_index = tf.constant(relative_position_index, dtype=tf.int32)
+        self.relative_position_index = self.add_weight(
+            shape=relative_position_index.shape,
+            initializer=tf.keras.initializers.Constant(relative_position_index),
+            trainable=False,
+            dtype=tf.int32,
+            name='relative_position_index',
+        )
 
     def call(self, x, mask=None):
         _, size, channels = x.shape
@@ -218,20 +224,32 @@ class SwinTransformer(layers.Layer):
                 for w in w_slices:
                     mask_array[:, h, w, :] = count
                     count += 1
-            mask_array = tf.convert_to_tensor(mask_array)
 
-            # mask array to windows
-            mask_windows = window_partition(mask_array, self.window_size)
-            mask_windows = tf.reshape(
-                mask_windows, shape=[-1, self.window_size * self.window_size]
+            # Compute attention mask in NumPy so it can be stored as a stable
+            # non-trainable Keras weight, avoiding tf.function graph scope issues.
+            mask_windows = mask_array.reshape(
+                1,
+                height // self.window_size,
+                self.window_size,
+                width // self.window_size,
+                self.window_size,
+                1,
             )
-            attn_mask = tf.expand_dims(mask_windows, axis=1) - tf.expand_dims(
+            mask_windows = np.transpose(mask_windows, (0, 1, 3, 2, 4, 5))
+            mask_windows = mask_windows.reshape(-1, self.window_size * self.window_size)
+
+            attn_mask = np.expand_dims(mask_windows, axis=1) - np.expand_dims(
                 mask_windows, axis=2
             )
-            attn_mask = tf.where(attn_mask != 0, -100.0, attn_mask)
-            attn_mask = tf.where(attn_mask == 0, 0.0, attn_mask)
-            attn_mask = tf.cast(attn_mask, tf.float32)
-            self.attn_mask = tf.constant(attn_mask, dtype=tf.float32)
+            attn_mask = np.where(attn_mask != 0, -100.0, attn_mask)
+            attn_mask = np.where(attn_mask == 0, 0.0, attn_mask).astype(np.float32)
+            self.attn_mask = self.add_weight(
+                shape=attn_mask.shape,
+                initializer=tf.keras.initializers.Constant(attn_mask),
+                trainable=False,
+                dtype=tf.float32,
+                name='attn_mask',
+            )
 
     def call(self, x):
         height, width = self.num_patch
