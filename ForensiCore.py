@@ -230,6 +230,7 @@ class SwinTransformer(layers.Layer):
             )
             attn_mask = tf.where(attn_mask != 0, -100.0, attn_mask)
             attn_mask = tf.where(attn_mask == 0, 0.0, attn_mask)
+            attn_mask = tf.cast(attn_mask, tf.float32)
             self.attn_mask = tf.constant(attn_mask, dtype=tf.float32)
 
     def call(self, x):
