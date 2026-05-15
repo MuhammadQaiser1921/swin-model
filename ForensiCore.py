@@ -84,13 +84,7 @@ class WindowAttention(layers.Layer):
         relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
         relative_position_index = relative_coords.sum(-1)
 
-        self.relative_position_index = self.add_weight(
-            shape=relative_position_index.shape,
-            initializer=tf.keras.initializers.Constant(relative_position_index),
-            trainable=False,
-            dtype=tf.int32,
-            name='relative_position_index',
-        )
+        self.relative_position_index = relative_position_index.astype(np.int32)
 
     def call(self, x, mask=None):
         _, size, channels = x.shape
@@ -104,9 +98,10 @@ class WindowAttention(layers.Layer):
         attn = q @ k
 
         num_window_elements = self.window_size[0] * self.window_size[1]
-        relative_position_index_flat = tf.reshape(
-            self.relative_position_index, shape=(-1,)
+        relative_position_index = tf.convert_to_tensor(
+            self.relative_position_index, dtype=tf.int32
         )
+        relative_position_index_flat = tf.reshape(relative_position_index, shape=(-1,))
         relative_position_bias = tf.gather(
             self.relative_position_bias_table, relative_position_index_flat
         )
@@ -225,8 +220,8 @@ class SwinTransformer(layers.Layer):
                     mask_array[:, h, w, :] = count
                     count += 1
 
-            # Compute attention mask in NumPy so it can be stored as a stable
-            # non-trainable Keras weight, avoiding tf.function graph scope issues.
+            # Keep mask as a NumPy buffer and convert to tensor in call(), which
+            # avoids both graph-scope and cross-device resource issues.
             mask_windows = mask_array.reshape(
                 1,
                 height // self.window_size,
@@ -242,14 +237,7 @@ class SwinTransformer(layers.Layer):
                 mask_windows, axis=2
             )
             attn_mask = np.where(attn_mask != 0, -100.0, attn_mask)
-            attn_mask = np.where(attn_mask == 0, 0.0, attn_mask).astype(np.float32)
-            self.attn_mask = self.add_weight(
-                shape=attn_mask.shape,
-                initializer=tf.keras.initializers.Constant(attn_mask),
-                trainable=False,
-                dtype=tf.float32,
-                name='attn_mask',
-            )
+            self.attn_mask = np.where(attn_mask == 0, 0.0, attn_mask).astype(np.float32)
 
     def call(self, x):
         height, width = self.num_patch
@@ -268,7 +256,12 @@ class SwinTransformer(layers.Layer):
         x_windows = tf.reshape(
             x_windows, shape=(-1, self.window_size * self.window_size, channels)
         )
-        attn_windows = self.attn(x_windows, mask=self.attn_mask)
+        if self.attn_mask is None:
+            attn_mask = None
+        else:
+            attn_mask = tf.convert_to_tensor(self.attn_mask, dtype=tf.float32)
+
+        attn_windows = self.attn(x_windows, mask=attn_mask)
 
         attn_windows = tf.reshape(
             attn_windows, shape=(-1, self.window_size, self.window_size, channels)
