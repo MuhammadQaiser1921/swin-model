@@ -349,9 +349,14 @@ def run_video_pipeline():
     print(f"Best val_accuracy: {best_val_acc:.4f}")
     print(f"Best val_loss: {best_val_loss:.4f}")
 
-    test_loss, test_acc = model.evaluate(test_ds, verbose=1)
+    test_results = model.evaluate(test_ds, verbose=1)
+    test_loss = test_results[0]
+    test_acc = test_results[1]
+    test_auc = test_results[2] if len(test_results) > 2 else None
     print(f"Test loss: {test_loss:.4f}")
     print(f"Test accuracy: {test_acc:.4f}")
+    if test_auc is not None:
+        print(f"Test AUC: {test_auc:.4f}")
 
     final_model_path = f"{MODEL_NAME}.keras"
     model.save(final_model_path)
