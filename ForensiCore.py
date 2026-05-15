@@ -117,7 +117,7 @@ class WindowAttention(layers.Layer):
         attn = attn + tf.expand_dims(relative_position_bias, axis=0)
 
         if mask is not None:
-            nW = mask.get_shape()[0]
+            nW = tf.shape(mask)[0]
             mask_float = tf.cast(
                 tf.expand_dims(tf.expand_dims(mask, axis=1), axis=0), tf.float32
             )
