@@ -275,8 +275,9 @@ def run_audio_pipeline():
     print(f"Test loss: {test_loss:.4f}")
     print(f"Test accuracy: {test_acc:.4f}")
 
-    model.save(MODEL_NAME)
-    print(f"model saved: {MODEL_NAME}")
+    final_model_path = f"{MODEL_NAME}.keras"
+    model.save(final_model_path)
+    print(f"model saved: {final_model_path}")
 
     plt.plot(history.history['accuracy'], label='train_accuracy')
     plt.plot(history.history['val_accuracy'], label='val_accuracy')
